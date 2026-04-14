@@ -92,6 +92,13 @@ void Scattering1DIntegrand(const MyQuadrature* quad,
 
     BS_REAL g_nu[total_num_species];
 
+    // Precompute EtaNNSc for protons and neutrons - constant across all
+    // quadrature points and species since nb, temp, yp, yn don't change.
+    const BS_REAL nb      = grey_pars->eos_pars.nb;
+    const BS_REAL temp    = grey_pars->eos_pars.temp;
+    const BS_REAL etaNN_p = EtaNNSc(nb, temp, grey_pars->eos_pars.yp);
+    const BS_REAL etaNN_n = EtaNNSc(nb, temp, grey_pars->eos_pars.yn);
+
     for (int i = 0; i < n; ++i)
     {
         for (int idx = 0; idx < total_num_species; ++idx)
@@ -105,8 +112,8 @@ void Scattering1DIntegrand(const MyQuadrature* quad,
             // compute the neutrino distribution function
             g_nu[idx] = TotalNuF(nu, &grey_pars->distr_pars, idx);
 
-            iso_scatt = IsoScattTotal(nu, &grey_pars->opacity_pars,
-                                      &grey_pars->eos_pars);
+            iso_scatt = IsoScattTotalFast(nu, &grey_pars->opacity_pars, etaNN_p,
+                                          etaNN_n);
 
             aux = four_pi * POW2(nu) * POW2(nu) * nu * iso_scatt;
 
@@ -121,8 +128,8 @@ void Scattering1DIntegrand(const MyQuadrature* quad,
             // compute the neutrino distribution function
             g_nu[idx] = TotalNuF(nu, &grey_pars->distr_pars, idx);
 
-            iso_scatt = IsoScattTotal(nu, &grey_pars->opacity_pars,
-                                      &grey_pars->eos_pars);
+            iso_scatt = IsoScattTotalFast(nu, &grey_pars->opacity_pars, etaNN_p,
+                                          etaNN_n);
 
             aux = four_pi * POW2(nu) * POW2(nu) * nu * iso_scatt;
 

@@ -746,6 +746,51 @@ BS_REAL IsoScattTotal(const BS_REAL omega, OpacityParams* opacity_pars,
     return iso_nu_p + iso_nu_n;
 }
 
+// Fast version of IsoScattNucleon that accepts precomputed etaNN.
+// Identical to IsoScattNucleon except the EtaNNSc call is skipped.
+KOKKOS_INLINE_FUNCTION
+BS_REAL IsoScattNucleonFast(const BS_REAL omega, OpacityParams* opacity_pars,
+                            const BS_REAL etaNN, const int reacflag)
+{
+    constexpr BS_REAL three = 3;
+
+    BS_REAL R0 = 1., R1 = 1.;
+    BS_REAL leg_0, leg_1;
+
+    // Phase space, recoil and weak magnetism corrections
+    if (opacity_pars->use_WM_sc)
+    {
+        WMScatt(omega, &R0, &R1, reacflag);
+    }
+
+    if (reacflag == 1)
+    {
+        // Scattering on proton
+        leg_0 = kBS_Iso_c0_p * R0;
+        leg_1 = kBS_Iso_c1_p * R1;
+    }
+    else if (reacflag == 2)
+    {
+        // Scattering on neutron
+        leg_0 = kBS_Iso_c0_n * R0;
+        leg_1 = kBS_Iso_c1_n * R1;
+    }
+
+    // Eq.(A41)
+    return etaNN * (leg_0 - leg_1 / three);
+}
+
+// Fast version of IsoScattTotal that accepts precomputed etaNN values.
+KOKKOS_INLINE_FUNCTION
+BS_REAL IsoScattTotalFast(const BS_REAL omega, OpacityParams* opacity_pars,
+                          const BS_REAL etaNN_p, const BS_REAL etaNN_n)
+{
+    const BS_REAL iso_nu_p =
+        IsoScattNucleonFast(omega, opacity_pars, etaNN_p, 1);
+    const BS_REAL iso_nu_n =
+        IsoScattNucleonFast(omega, opacity_pars, etaNN_n, 2);
+    return iso_nu_p + iso_nu_n;
+}
 
 /**
  * @fn BS_REAL IsoScattLegCoeff(const BS_REAL omega, OpacityParams
