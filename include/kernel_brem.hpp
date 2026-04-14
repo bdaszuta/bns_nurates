@@ -33,15 +33,15 @@
 KOKKOS_INLINE_FUNCTION
 BS_REAL BremKernelS(BS_REAL x, BS_REAL y, BS_REAL eta_star)
 {
-    [[maybe_unused]] constexpr BS_REAL zero   = 0;
-    constexpr BS_REAL one    = 1;
-    constexpr BS_REAL two    = 2;
-    constexpr BS_REAL three  = 3;
-    constexpr BS_REAL four   = 4;
-    constexpr BS_REAL five   = 5;
-    constexpr BS_REAL six    = 6;
-    constexpr BS_REAL twelve = 12;
-    constexpr BS_REAL thirty = 30;
+    [[maybe_unused]] constexpr BS_REAL zero = 0;
+    constexpr BS_REAL one                   = 1;
+    constexpr BS_REAL two                   = 2;
+    constexpr BS_REAL three                 = 3;
+    constexpr BS_REAL four                  = 4;
+    constexpr BS_REAL five                  = 5;
+    constexpr BS_REAL six                   = 6;
+    constexpr BS_REAL twelve                = 12;
+    constexpr BS_REAL thirty                = 30;
 
     constexpr BS_REAL three_halves         = 1.5;
     constexpr BS_REAL five_halves          = 2.5;
@@ -165,11 +165,11 @@ BS_REAL BremKernelS(BS_REAL x, BS_REAL y, BS_REAL eta_star)
 KOKKOS_INLINE_FUNCTION
 BS_REAL BremKernelG(BS_REAL y, BS_REAL eta_star)
 {
-    [[maybe_unused]] constexpr BS_REAL zero       = 0;
-    constexpr BS_REAL one        = 1;
-    constexpr BS_REAL two        = 2;
-    constexpr BS_REAL half       = 0.5;
-    constexpr BS_REAL twentyfive = 25;
+    [[maybe_unused]] constexpr BS_REAL zero = 0;
+    constexpr BS_REAL one                   = 1;
+    constexpr BS_REAL two                   = 2;
+    constexpr BS_REAL half                  = 0.5;
+    constexpr BS_REAL twentyfive            = 25;
 
     constexpr BS_REAL three_halves       = 1.5;
     constexpr BS_REAL five_halves        = 2.5;
@@ -389,6 +389,295 @@ MyKernelOutput BremKernelsLegCoeff(BremKernelParams* kernel_params,
         brem_kernel.em[idx]  = s_em;
     }
 
+    return brem_kernel;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Pre-computed bremsstrahlung state for hoisting energy-independent quantities
+// out of loops. All expression trees in BremKernelSFast are identical to
+// BremKernelS; we only cache sub-expressions that depend on y/eta_star alone.
+////////////////////////////////////////////////////////////////////////////////
+
+struct BremPrecomputedChannel
+{
+    BS_REAL eta_star;         // nucleon degeneracy parameter (clamped)
+    BS_REAL y;                // pion mass parameter (clamped)
+    BS_REAL gamma;            // spin-fluctuation rate
+    BS_REAL half_gamma_gb;    // half * gamma * BremKernelG(y, eta_star)
+    BS_REAL f_u;              // f(u) from Eqn. (46), clamped
+    BS_REAL pow_eta_neg5half; // pow(eta_star, -2.5)
+    BS_REAL exp_neg_y_12;     // SafeExp(-y / 12)
+    BS_REAL pow_y_c2;         // pow(y, 1.05)
+    BS_REAL sqrt_eta;         // sqrt(eta_star)
+    BS_REAL eta_sq;           // POW2(eta_star)
+    BS_REAL y4;               // POW4(y)
+    BS_REAL y_sq;             // POW2(y)
+    BS_REAL h_brem; // 0.1 * eta_star / (2.39 + 0.1 * pow(eta_star, 1.1))
+    BS_REAL p_brem; // 0.67 + 0.18 * pow(y, 0.4)
+};
+
+struct BremPrecomputed
+{
+    BremPrecomputedChannel ch_nn;
+    BremPrecomputedChannel ch_pp;
+    BremPrecomputedChannel ch_np;
+
+    BS_REAL nn;          // neutron number density [nm^-3]
+    BS_REAL np;          // proton number density  [nm^-3]
+    BS_REAL n_mean;      // geometric mean nucleon density [nm^-3]
+    BS_REAL T;           // temperature [MeV]
+    BS_REAL medium_corr; // medium correction denominator (1 if disabled)
+};
+
+KOKKOS_INLINE_FUNCTION
+BremPrecomputedChannel
+BremPrecomputeChannel(const BS_REAL n_nuc, const BS_REAL m_nuc, const BS_REAL T,
+                      const BS_REAL T_10, const BS_REAL y_raw)
+{
+    constexpr BS_REAL two                 = 2;
+    constexpr BS_REAL three               = 3;
+    constexpr BS_REAL four                = 4;
+    constexpr BS_REAL five                = 5;
+    constexpr BS_REAL six                 = 6;
+    constexpr BS_REAL twelve              = 12;
+    constexpr BS_REAL one                 = 1;
+    constexpr BS_REAL half                = 0.5;
+    constexpr BS_REAL two_thirds          = 2. / 3.;
+    constexpr BS_REAL three_halves        = 1.5;
+    constexpr BS_REAL five_halves         = 2.5;
+    constexpr BS_REAL eleven_tenth        = 1.1;
+    constexpr BS_REAL one_fifth           = 0.2;
+    constexpr BS_REAL two_fifth           = 0.4;
+    constexpr BS_REAL one_tenth           = 0.1;
+    constexpr BS_REAL sixtyseven_hundreds = 0.67;
+    constexpr BS_REAL eighteen_hundreds   = 0.18;
+    constexpr BS_REAL c1_gamma            = 1.63;
+    constexpr BS_REAL c4                  = 2.39;
+
+    constexpr BS_REAL ten_minus_fourteen = 1.e-14;
+    constexpr BS_REAL ten_minus_ten      = 1.e-10;
+    constexpr BS_REAL ten_minus_seven    = 1.e-7;
+
+    BremPrecomputedChannel ch;
+
+    // Clamp eta_star and y (same as BremKernelS)
+    BS_REAL eta_star = pow(three * kBS_PiSquared * n_nuc, two_thirds) *
+                       kBS_Brem_Aux1 / (two * m_nuc * T);
+    eta_star  = (eta_star > kBS_Brem_Etamin) ? eta_star : kBS_Brem_Etamin;
+    BS_REAL y = (y_raw > kBS_Brem_Ymin) ? y_raw : kBS_Brem_Ymin;
+
+    ch.eta_star = eta_star;
+    ch.y        = y;
+
+    // gamma and g for BremSingleChannelAbsKernel
+    ch.gamma         = c1_gamma * pow(eta_star, three_halves) * T_10;
+    const BS_REAL gb = BremKernelG(y_raw, eta_star);
+    ch.half_gamma_gb = half * ch.gamma * gb;
+
+    // Precompute sub-expressions used in BremKernelS
+    ch.pow_eta_neg5half = pow(eta_star, -five_halves);
+    ch.sqrt_eta         = sqrt(eta_star);
+    ch.eta_sq           = POW2(eta_star);
+    ch.y4               = POW4(y);
+    ch.y_sq             = POW2(y);
+    ch.pow_y_c2         = pow(y, BS_REAL(1.05));
+    ch.exp_neg_y_12     = SafeExp(-y / twelve);
+
+    // f_u from Eqn. (46)
+    const BS_REAL u     = sqrt(y / (two * eta_star)) + ten_minus_ten;
+    const BS_REAL u2    = POW2(u);
+    const BS_REAL u_arg = u2 / (two * sqrt(two * u2 + four));
+    BS_REAL f_u_val =
+        (one - five * u * atan(two / u) / six + u2 / (three * (u2 + four)) +
+         atan(one / u_arg) * u_arg / three);
+
+    BS_REAL fu_threshold;
+    if constexpr (std::is_same_v<BS_REAL, float>)
+        fu_threshold = ten_minus_seven;
+    else
+        fu_threshold = ten_minus_fourteen;
+    f_u_val = (fabs(f_u_val) < fu_threshold) ? fu_threshold : f_u_val;
+    ch.f_u  = f_u_val;
+
+    // h_brem and p_brem
+    ch.h_brem =
+        one_tenth * eta_star / (c4 + one_tenth * pow(eta_star, eleven_tenth));
+    ch.p_brem = sixtyseven_hundreds + eighteen_hundreds * pow(y, two_fifth);
+
+    return ch;
+}
+
+KOKKOS_INLINE_FUNCTION
+BremPrecomputed PrecomputeBremParams(MyEOSParams* eos_params,
+                                     bool use_NN_medium_corr)
+{
+    constexpr BS_REAL one_tenth = 0.1;
+    constexpr BS_REAL one       = 1;
+    constexpr BS_REAL three     = 3;
+    constexpr BS_REAL c2        = 1.94;
+
+    BremPrecomputed bp;
+
+    const BS_REAL T    = eos_params->temp;
+    const BS_REAL T_10 = T * one_tenth;
+    const BS_REAL y    = c2 / T_10;
+    bp.T               = T;
+
+    const BS_REAL nb = eos_params->nb;
+    const BS_REAL xn = eos_params->yn;
+    const BS_REAL xp = eos_params->yp;
+
+    bp.nn     = nb * xn;
+    bp.np     = nb * xp;
+    bp.n_mean = nb * sqrt(xn * xp);
+
+    bp.ch_nn = BremPrecomputeChannel(bp.nn, kBS_MnGrams, T, T_10, y);
+    bp.ch_pp = BremPrecomputeChannel(bp.np, kBS_MpGrams, T, T_10, y);
+    bp.ch_np = BremPrecomputeChannel(bp.n_mean, kBS_MAvgGrams, T, T_10, y);
+
+    if (use_NN_medium_corr)
+    {
+        bp.medium_corr = POW6((one + cbrt(nb / kBS_Saturation_n) / three));
+    }
+    else
+    {
+        bp.medium_corr = one;
+    }
+
+    return bp;
+}
+
+// BremKernelSFast: identical expression trees to BremKernelS but reads
+// precomputed y/eta_star-dependent sub-expressions from ch.
+KOKKOS_INLINE_FUNCTION
+BS_REAL BremKernelSFast(BS_REAL x, const BremPrecomputedChannel& ch)
+{
+    [[maybe_unused]] constexpr BS_REAL zero = 0;
+    constexpr BS_REAL one                   = 1;
+    constexpr BS_REAL two                   = 2;
+    constexpr BS_REAL three                 = 3;
+    constexpr BS_REAL four                  = 4;
+    constexpr BS_REAL five                  = 5;
+    constexpr BS_REAL twelve                = 12;
+    constexpr BS_REAL thirty                = 30;
+
+    constexpr BS_REAL three_halves         = 1.5;
+    constexpr BS_REAL five_halves          = 2.5;
+    constexpr BS_REAL eleven_tenth         = 1.1;
+    constexpr BS_REAL twelve_tenth         = 1.2;
+    constexpr BS_REAL one_fifth            = 0.2;
+    constexpr BS_REAL four_fifth           = 0.8;
+    constexpr BS_REAL fourteen_fifth       = 2.8;
+    constexpr BS_REAL five_thousands       = 0.005;
+    constexpr BS_REAL six_hundreds         = 0.06;
+    constexpr BS_REAL twentythree_tenth    = 2.3;
+    constexpr BS_REAL ninetythree_hundreds = 0.93;
+
+    constexpr BS_REAL c1 = 0.0044;
+    constexpr BS_REAL c3 = 0.0001;
+
+    // Clamp x (y and eta_star already clamped during precomputation)
+    x = (x > kBS_Brem_Xmin) ? x : kBS_Brem_Xmin;
+
+    // Read precomputed values
+    const BS_REAL y        = ch.y;
+    const BS_REAL eta_star = ch.eta_star;
+
+    // s_nd, Eqn. (45) -- identical expression tree, SafeExp arg uses cached
+    // value
+    const BS_REAL s_nd_numerator =
+        two * kBS_SqrtPi * pow(x + two - ch.exp_neg_y_12, three_halves) *
+        (POW2(x) + two * x * y + five * ch.y_sq / three + one);
+    const BS_REAL s_nd_denominator =
+        kBS_SqrtPi + POW4(kBS_Pi2OneEighth + x + y);
+    const BS_REAL s_nd = s_nd_numerator / s_nd_denominator;
+
+    // s_d, Eqn. (46) -- identical expression tree, pow(eta,-5/2) and f_u cached
+    const BS_REAL s_d = three * kBS_PiHalfToFiveHalves * ch.pow_eta_neg5half *
+                        (POW2(x) + kBS_FourPiSquared) * x * ch.f_u /
+                        (kBS_FourPiSquared * (one - SafeExp(-x)));
+
+    const BS_REAL pow_x_1_1 = pow(x, eleven_tenth);
+
+    // F, Eqn. (50) -- identical, using cached eta_sq and y4
+    const BS_REAL f_denominator =
+        (three + POW2(x - twelve_tenth) + pow(x, -four)) * (one + ch.eta_sq) *
+        (one + ch.y4);
+    const BS_REAL f_brem = one + one / f_denominator;
+
+    // G, Eqn. (50) -- identical expression tree, using cached pow_y_c2 and
+    // sqrt_eta
+    const BS_REAL g_brem = one - c1 * pow_x_1_1 * y /
+                                     (four_fifth + six_hundreds * ch.pow_y_c2) *
+                                     ch.sqrt_eta / (eta_star + one_fifth);
+
+    // C, Eqn. (50) -- identical, using cached h_brem
+    const BS_REAL c_brem =
+        eleven_tenth * pow_x_1_1 * ch.h_brem /
+        (twentythree_tenth + ch.h_brem * pow(x, ninetythree_hundreds) +
+         c3 * pow(x, twelve_tenth)) *
+        thirty / (thirty + five_thousands * pow(x, fourteen_fifth));
+
+    // interpolated formula, Eqn. (49) -- identical, using cached p_brem
+    const BS_REAL s_brem =
+        pow(pow(s_nd, -ch.p_brem) + pow(s_d, -ch.p_brem), -one / ch.p_brem) *
+        f_brem * (one + c_brem * g_brem);
+
+    BS_ASSERT(s_brem >= zero);
+
+    return s_brem;
+}
+
+// Identical expression tree to BremSingleChannelAbsKernel
+KOKKOS_INLINE_FUNCTION
+BS_REAL BremSingleChannelAbsKernelFast(BS_REAL x,
+                                       const BremPrecomputedChannel& ch,
+                                       const BS_REAL T)
+{
+    constexpr BS_REAL half = 0.5;
+
+    const BS_REAL sb = BremKernelSFast(x, ch);
+    return ch.gamma / (POW2(x) + POW2(ch.half_gamma_gb)) * sb / T;
+}
+
+KOKKOS_INLINE_FUNCTION
+BS_REAL BremAllChannelsAbsKernelFast(BS_REAL x, const BremPrecomputed& bp)
+{
+    constexpr BS_REAL twentyeight_thirds = 28. / 3.;
+    constexpr BS_REAL one                = 1;
+    constexpr BS_REAL three              = 3;
+
+    const BS_REAL s_abs_nn = BremSingleChannelAbsKernelFast(x, bp.ch_nn, bp.T);
+    const BS_REAL s_abs_pp = BremSingleChannelAbsKernelFast(x, bp.ch_pp, bp.T);
+    const BS_REAL s_abs_np = BremSingleChannelAbsKernelFast(x, bp.ch_np, bp.T);
+
+    BS_REAL s_abs_tot =
+        kBS_Brem_Const * (bp.nn * s_abs_nn + bp.np * s_abs_pp +
+                          twentyeight_thirds * bp.n_mean * s_abs_np);
+
+    s_abs_tot = s_abs_tot / bp.medium_corr;
+
+    return s_abs_tot;
+}
+
+KOKKOS_INLINE_FUNCTION
+MyKernelOutput BremKernelsLegCoeffFast(BS_REAL omega, BS_REAL omega_prime,
+                                       const BremPrecomputed& bp)
+{
+    constexpr BS_REAL three = 3;
+
+    const BS_REAL x = (omega + omega_prime) / bp.T;
+
+    BS_REAL s_abs = three * BremAllChannelsAbsKernelFast(x, bp);
+
+    BS_REAL s_em = s_abs * SafeExp(-x);
+
+    MyKernelOutput brem_kernel;
+    for (int idx = 0; idx < total_num_species; ++idx)
+    {
+        brem_kernel.abs[idx] = s_abs;
+        brem_kernel.em[idx]  = s_em;
+    }
     return brem_kernel;
 }
 

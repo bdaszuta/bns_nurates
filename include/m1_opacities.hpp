@@ -441,20 +441,14 @@ void AddBremKernelsToIntegrand(int n, BS_REAL* nu_array,
     }
     else
     {
-        grey_pars->kernel_pars.brem_kernel_params.l = 0;
-        grey_pars->kernel_pars.brem_kernel_params.use_NN_medium_corr =
-            grey_pars->opacity_pars.use_NN_medium_corr;
+        // Precompute all state-dependent brem constants once
+        BremPrecomputed bp = PrecomputeBremParams(
+            &grey_pars->eos_pars, grey_pars->opacity_pars.use_NN_medium_corr);
 
         for (int i = 0; i < 2 * n; ++i)
         {
-
-            grey_pars->kernel_pars.brem_kernel_params.omega       = nu_array[i];
-            grey_pars->kernel_pars.brem_kernel_params.omega_prime = nu_array[i];
-
-            // compute the brem kernels
-            brem_ker =
-                BremKernelsLegCoeff(&grey_pars->kernel_pars.brem_kernel_params,
-                                    &grey_pars->eos_pars);
+            // compute the brem kernels using precomputed constants
+            brem_ker = BremKernelsLegCoeffFast(nu_array[i], nu_array[i], bp);
 
             for (int idx = 0; idx < total_num_species; ++idx)
             {
@@ -464,12 +458,9 @@ void AddBremKernelsToIntegrand(int n, BS_REAL* nu_array,
 
             for (int j = i + 1; j < 2 * n; ++j)
             {
-                // compute the brem kernels
-                grey_pars->kernel_pars.brem_kernel_params.omega_prime =
-                    nu_array[j];
-                brem_ker = BremKernelsLegCoeff(
-                    &grey_pars->kernel_pars.brem_kernel_params,
-                    &grey_pars->eos_pars);
+                // compute the brem kernels using precomputed constants
+                brem_ker =
+                    BremKernelsLegCoeffFast(nu_array[i], nu_array[j], bp);
 
                 for (int idx = 0; idx < total_num_species; ++idx)
                 {
