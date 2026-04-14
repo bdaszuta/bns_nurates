@@ -9,6 +9,11 @@
 #include <stdlib.h>
 #include <math.h>
 
+// Enable sub-reaction profiling (belt-and-suspenders; CMake also sets this)
+#ifndef PROFILE_SUBREACTIONS
+#define PROFILE_SUBREACTIONS
+#endif
+
 #include "bns_nurates.hpp"
 #include "m1_opacities.hpp"
 #include "integration.hpp"
@@ -224,9 +229,18 @@ int main(int argc, char* argv[])
         }
 
         timer.tic();
+        ResetSubReactionProfile();
         spectral_rates = ComputeSpectralOpacitiesNotStimulatedAbs(
             nu_energy, &my_quadrature, &my_grey_opacity_params);
         g_profile_entries[IDX_SPECTRAL_EQ].total_us += timer.toc();
+        g_profile_entries[IDX_SPECTRAL_EQ_PAIR_BREM].total_us +=
+            g_subreaction_profile.time_sp_pair_brem_us;
+        g_profile_entries[IDX_SPECTRAL_EQ_NEPS].total_us +=
+            g_subreaction_profile.time_sp_neps_us;
+        g_profile_entries[IDX_SPECTRAL_EQ_BETA].total_us +=
+            g_subreaction_profile.time_sp_beta_us;
+        g_profile_entries[IDX_SPECTRAL_EQ_ISO].total_us +=
+            g_subreaction_profile.time_sp_iso_us;
 
         if (iter == 0)
         {
@@ -252,9 +266,20 @@ int main(int argc, char* argv[])
         }
 
         timer.tic();
+        ResetSubReactionProfile();
         gray_rates = ComputeM1Opacities(&my_quadrature, &my_quadrature,
                                         &my_grey_opacity_params);
         g_profile_entries[IDX_M1_EQ].total_us += timer.toc();
+        g_profile_entries[IDX_M1_EQ_ISO].total_us +=
+            g_subreaction_profile.time_m1_iso_us;
+        g_profile_entries[IDX_M1_EQ_BETA].total_us +=
+            g_subreaction_profile.time_m1_beta_us;
+        g_profile_entries[IDX_M1_EQ_PAIR_BREM].total_us +=
+            g_subreaction_profile.time_m1_pair_brem_us;
+        g_profile_entries[IDX_M1_EQ_NEPS].total_us +=
+            g_subreaction_profile.time_m1_neps_us;
+        g_profile_entries[IDX_M1_EQ_ASSEMBLY].total_us +=
+            g_subreaction_profile.time_m1_assembly_us;
 
         if (iter == 0)
         {
@@ -312,9 +337,18 @@ int main(int argc, char* argv[])
         g_profile_entries[IDX_DISTR_FROM_M1].total_us += timer.toc();
 
         timer.tic();
+        ResetSubReactionProfile();
         spectral_rates = ComputeSpectralOpacitiesNotStimulatedAbs(
             nu_energy, &my_quadrature, &my_grey_opacity_params);
         g_profile_entries[IDX_SPECTRAL_M1].total_us += timer.toc();
+        g_profile_entries[IDX_SPECTRAL_M1_PAIR_BREM].total_us +=
+            g_subreaction_profile.time_sp_pair_brem_us;
+        g_profile_entries[IDX_SPECTRAL_M1_NEPS].total_us +=
+            g_subreaction_profile.time_sp_neps_us;
+        g_profile_entries[IDX_SPECTRAL_M1_BETA].total_us +=
+            g_subreaction_profile.time_sp_beta_us;
+        g_profile_entries[IDX_SPECTRAL_M1_ISO].total_us +=
+            g_subreaction_profile.time_sp_iso_us;
 
         if (iter == 0)
         {
@@ -340,9 +374,20 @@ int main(int argc, char* argv[])
         }
 
         timer.tic();
+        ResetSubReactionProfile();
         gray_rates = ComputeM1Opacities(&my_quadrature, &my_quadrature,
                                         &my_grey_opacity_params);
         g_profile_entries[IDX_M1_M1].total_us += timer.toc();
+        g_profile_entries[IDX_M1_M1_ISO].total_us +=
+            g_subreaction_profile.time_m1_iso_us;
+        g_profile_entries[IDX_M1_M1_BETA].total_us +=
+            g_subreaction_profile.time_m1_beta_us;
+        g_profile_entries[IDX_M1_M1_PAIR_BREM].total_us +=
+            g_subreaction_profile.time_m1_pair_brem_us;
+        g_profile_entries[IDX_M1_M1_NEPS].total_us +=
+            g_subreaction_profile.time_m1_neps_us;
+        g_profile_entries[IDX_M1_M1_ASSEMBLY].total_us +=
+            g_subreaction_profile.time_m1_assembly_us;
 
         if (iter == 0)
         {

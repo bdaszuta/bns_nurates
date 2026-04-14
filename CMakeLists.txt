@@ -92,6 +92,7 @@ mwe.cpp)
 ADD_BNSNURATES_EXECUTABLE(
 MWE_profile
 mwe_profile.cpp)
+target_compile_definitions(MWE_profile PRIVATE PROFILE_SUBREACTIONS)
 
 ADD_BNSNURATES_EXECUTABLE(
 point_out

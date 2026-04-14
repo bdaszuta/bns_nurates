@@ -13,6 +13,49 @@
 #include "integration.hpp"
 #include "distribution.hpp"
 
+#ifdef PROFILE_SUBREACTIONS
+#include <chrono>
+
+// Sub-reaction profiling data accumulated across calls.
+// All times are in microseconds.
+struct SubReactionProfile
+{
+    // ComputeM1OpacitiesGenericFormalism sub-reactions
+    double time_m1_iso_us;
+    double time_m1_beta_us;
+    double time_m1_pair_brem_us;
+    double time_m1_neps_us;
+    double time_m1_assembly_us;
+
+    // ComputeSpectralOpacitiesNotStimulatedAbs sub-reactions
+    double time_sp_pair_brem_us;
+    double time_sp_neps_us;
+    double time_sp_beta_us;
+    double time_sp_iso_us;
+};
+
+// Global profiler instance (thread_local for OpenMP safety)
+inline thread_local SubReactionProfile g_subreaction_profile;
+
+inline void ResetSubReactionProfile()
+{
+    g_subreaction_profile = SubReactionProfile{};
+}
+
+// Helper macros for sub-reaction timing
+#define PROFILE_TIC()                                                          \
+    auto _prof_start = std::chrono::high_resolution_clock::now()
+#define PROFILE_TOC(field)                                                     \
+    do                                                                         \
+    {                                                                          \
+        auto _prof_end = std::chrono::high_resolution_clock::now();            \
+        g_subreaction_profile.field +=                                         \
+            std::chrono::duration<double, std::micro>(_prof_end - _prof_start) \
+                .count();                                                      \
+    } while (0)
+
+#endif // PROFILE_SUBREACTIONS
+
 /* Thresholds on the neutrino energy number and energy density. If values are
 below the thresholds, absorption opacities or scattering opacities are set to 0.
 */
@@ -776,8 +819,8 @@ M1MatrixKokkos2D ComputeDoubleIntegrand(const MyQuadrature* quad, BS_REAL t,
     // ////// ONLY FOR COMPARISON WITH NULIB ////////
     // //////////////////////////////////////////////
     // compute the neutrino & anti-neutrino distribution function
-    //BS_REAL g_nu[total_num_species], g_nu_bar[total_num_species];
-    //BS_REAL block_factor_nu[total_num_species],
+    // BS_REAL g_nu[total_num_species], g_nu_bar[total_num_species];
+    // BS_REAL block_factor_nu[total_num_species],
     //    block_factor_nu_bar[total_num_species];
     //
     // if (kirchoff_flag)
@@ -1074,10 +1117,16 @@ M1Opacities ComputeM1OpacitiesGenericFormalism(
     MyQuadratureIntegrand iso_integrals = {0};
     if (my_grey_opacity_params->opacity_flags.use_iso == 1)
     {
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TIC();
+#endif
         BS_REAL out_iso[total_num_species][BS_N_MAX];
         Scattering1DIntegrand(quad_1d, my_grey_opacity_params, s_iso, out_iso);
         iso_integrals = GaussLegendreIntegrate1DMatrix(
             quad_1d, total_num_species, out_iso, s_iso);
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TOC(time_m1_iso_us);
+#endif
     }
 
     MyQuadratureIntegrand beta_n_em_integrals  = {0};
@@ -1087,6 +1136,9 @@ M1Opacities ComputeM1OpacitiesGenericFormalism(
 
     if (my_grey_opacity_params->opacity_flags.use_abs_em == 1)
     {
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TIC();
+#endif
         BS_REAL out_beta_em[total_num_species][BS_N_MAX];
         BS_REAL out_beta_ab[total_num_species][BS_N_MAX];
 
@@ -1099,6 +1151,9 @@ M1Opacities ComputeM1OpacitiesGenericFormalism(
         GaussLegendreIntegrate1DMatrixOnlyNumber(quad_1d, 2, out_beta_ab,
                                                  s_beta, &beta_n_abs_integrals,
                                                  &beta_j_abs_integrals);
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TOC(time_m1_beta_us);
+#endif
     }
 
 
@@ -1108,10 +1163,16 @@ M1Opacities ComputeM1OpacitiesGenericFormalism(
     if ((my_grey_opacity_params->opacity_flags.use_pair == 1) ||
         (my_grey_opacity_params->opacity_flags.use_brem == 1))
     {
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TIC();
+#endif
         M1MatrixKokkos2D out_pair = ComputeDoubleIntegrand(
             quad_2d, s_pair, my_grey_opacity_params, stim_abs);
         GaussLegendreIntegrate2DMatrixForM1Coeffs(
             quad_2d, &out_pair, s_pair, &n_integrals_2d, &e_integrals_2d);
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TOC(time_m1_pair_brem_us);
+#endif
     }
 
     MyQuadratureIntegrand n_neps_2d = {0};
@@ -1119,12 +1180,21 @@ M1Opacities ComputeM1OpacitiesGenericFormalism(
 
     if (my_grey_opacity_params->opacity_flags.use_inelastic_scatt == 1)
     {
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TIC();
+#endif
         M1MatrixKokkos2D out_inel = ComputeNEPSIntegrand(
             quad_2d, four * s_neps, my_grey_opacity_params, stim_abs);
         GaussLegendreIntegrate2DMatrixForNEPS(quad_2d, &out_inel, four * s_neps,
                                               &n_neps_2d, &e_neps_2d);
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TOC(time_m1_neps_us);
+#endif
     }
 
+#ifdef PROFILE_SUBREACTIONS
+    PROFILE_TIC();
+#endif
     M1Opacities m1_opacities = {0};
 
     /* Set all opacities to zero. They'll be left as 0 if the neutrino
@@ -1247,6 +1317,9 @@ M1Opacities ComputeM1OpacitiesGenericFormalism(
                                         iso_integrals.integrand[id_anux];
     }
 
+#ifdef PROFILE_SUBREACTIONS
+    PROFILE_TOC(time_m1_assembly_us);
+#endif
     return m1_opacities;
 }
 
@@ -1481,8 +1554,8 @@ SpectralOpacities ComputeSpectralOpacitiesNotStimulatedAbs(
         g_nu[idx] = TotalNuF(nu, &my_grey_opacity_params->distr_pars, idx);
     }
 
-    //const BS_REAL eta_e = my_grey_opacity_params->eos_pars.mu_e /
-    //                      my_grey_opacity_params->eos_pars.temp;
+    // const BS_REAL eta_e = my_grey_opacity_params->eos_pars.mu_e /
+    //                       my_grey_opacity_params->eos_pars.temp;
 
     constexpr BS_REAL temp_multiple = 0.5 * 4.364;
 
@@ -1500,31 +1573,55 @@ SpectralOpacities ComputeSpectralOpacitiesNotStimulatedAbs(
         // (FDI_p4(eta_e) / FDI_p3(eta_e) + FDI_p4(-eta_e) / FDI_p3(-eta_e));
     }
 
+#ifdef PROFILE_SUBREACTIONS
+    PROFILE_TIC();
+#endif
     MyQuadratureIntegrand integrals_pair_1d =
         GaussLegendreIntegrate1D(quad_1d, &integrand_m1_1d, s_pair);
+#ifdef PROFILE_SUBREACTIONS
+    PROFILE_TOC(time_sp_pair_brem_us);
+#endif
 
     MyQuadratureIntegrand integrals_neps_1d = {0};
     if (my_grey_opacity_params->opacity_flags.use_inelastic_scatt == 1)
     {
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TIC();
+#endif
         local_grey_params.opacity_flags                     = {0};
         local_grey_params.opacity_flags.use_inelastic_scatt = 1;
         integrand_m1_1d.params = &local_grey_params;
         integrals_neps_1d =
             GaussLegendreIntegrate1D(quad_1d, &integrand_m1_1d, s_neps);
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TOC(time_sp_neps_us);
+#endif
     }
 
     MyOpacity abs_em_beta = {0};
     if (my_grey_opacity_params->opacity_flags.use_abs_em)
     {
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TIC();
+#endif
         abs_em_beta = AbsOpacity(nu, &my_grey_opacity_params->opacity_pars,
                                  &my_grey_opacity_params->eos_pars); // [s^-1]
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TOC(time_sp_beta_us);
+#endif
     }
 
     BS_REAL iso_scatt = zero;
     if (my_grey_opacity_params->opacity_flags.use_iso)
     {
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TIC();
+#endif
         iso_scatt = IsoScattLegCoeff(nu, &my_grey_opacity_params->opacity_pars,
                                      &my_grey_opacity_params->eos_pars, 0);
+#ifdef PROFILE_SUBREACTIONS
+        PROFILE_TOC(time_sp_iso_us);
+#endif
     }
 
 
