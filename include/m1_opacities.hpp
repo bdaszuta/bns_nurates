@@ -1458,6 +1458,17 @@ M1Opacities ComputeM1Opacities(const MyQuadrature* quad_1d,
                                               my_grey_opacity_params, 1);
 }
 
+// Wrapper for SpectralIntegrand that optionally holds precomputed data.
+struct SpectralIntegrandParams
+{
+    GreyOpacityParams grey_pars;
+    PairPrecomputed pair_pre;
+    PairFDIAtPoint pair_fdi_omega;         // precomputed FDI at eta+-(omega/T)
+    BS_REAL g_nu_fixed[total_num_species]; // precomputed g_nu at fixed omega
+    bool has_pair_pre;
+    bool has_g_nu_fixed;
+};
+
 /* Compute the integrands for the computation of the spectral emissivity and
  * inverse mean free path */
 KOKKOS_INLINE_FUNCTION
@@ -1469,7 +1480,8 @@ MyQuadratureIntegrand SpectralIntegrand(BS_REAL* var, void* p)
     // energies and parameters
     BS_REAL nu_bar = var[0]; // [MeV]
 
-    GreyOpacityParams* my_grey_opacity_params = (GreyOpacityParams*)p;
+    SpectralIntegrandParams* sp_params        = (SpectralIntegrandParams*)p;
+    GreyOpacityParams* my_grey_opacity_params = &sp_params->grey_pars;
     MyEOSParams my_eos_params  = my_grey_opacity_params->eos_pars;
     OpacityFlags opacity_flags = my_grey_opacity_params->opacity_flags;
     OpacityParams opacity_pars = my_grey_opacity_params->opacity_pars;
@@ -1481,11 +1493,23 @@ MyQuadratureIntegrand SpectralIntegrand(BS_REAL* var, void* p)
     // compute the neutrino & anti-neutrino distribution function
     BS_REAL g_nu[total_num_species], g_nu_bar[total_num_species];
 
-    for (int idx = 0; idx < total_num_species; ++idx)
+    if (sp_params->has_g_nu_fixed)
     {
-        g_nu[idx] = TotalNuF(nu, &my_grey_opacity_params->distr_pars, idx);
-        g_nu_bar[idx] =
-            TotalNuF(nu_bar, &my_grey_opacity_params->distr_pars, idx);
+        for (int idx = 0; idx < total_num_species; ++idx)
+        {
+            g_nu[idx] = sp_params->g_nu_fixed[idx];
+            g_nu_bar[idx] =
+                TotalNuF(nu_bar, &my_grey_opacity_params->distr_pars, idx);
+        }
+    }
+    else
+    {
+        for (int idx = 0; idx < total_num_species; ++idx)
+        {
+            g_nu[idx] = TotalNuF(nu, &my_grey_opacity_params->distr_pars, idx);
+            g_nu_bar[idx] =
+                TotalNuF(nu_bar, &my_grey_opacity_params->distr_pars, idx);
+        }
     }
 
     // compute the pair kernels
@@ -1493,18 +1517,31 @@ MyQuadratureIntegrand SpectralIntegrand(BS_REAL* var, void* p)
         0}; //{.em_e = 0., .abs_e = 0., .em_x = 0., .abs_x = 0.};
     if (opacity_flags.use_pair)
     {
-        my_grey_opacity_params->kernel_pars.pair_kernel_params.omega_prime =
-            nu_bar;
-        my_grey_opacity_params->kernel_pars.pair_kernel_params.cos_theta = one;
-        my_grey_opacity_params->kernel_pars.pair_kernel_params.filter    = zero;
-        my_grey_opacity_params->kernel_pars.pair_kernel_params.lmax      = zero;
-        my_grey_opacity_params->kernel_pars.pair_kernel_params.mu        = one;
-        my_grey_opacity_params->kernel_pars.pair_kernel_params.mu_prime  = one;
-        // pair_kernels_m1 = PairKernels(&my_eos_params,
-        // &my_grey_opacity_params->kernel_pars.pair_kernel_params);
-        pair_kernels_m1 = PairKernels(
-            &my_eos_params,
-            &my_grey_opacity_params->kernel_pars.pair_kernel_params);
+        if (sp_params->has_pair_pre)
+        {
+            // Fast path: precomputed FDI values for omega (y).
+            // Only need to compute FDI values for omega_prime (z) per call.
+            PairFDIAtPoint fdi_z = PrecomputePairFDIAtPoint(
+                sp_params->pair_pre.eta, nu_bar / sp_params->pair_pre.T);
+            pair_kernels_m1 = PairKernelsFast(nu, nu_bar, sp_params->pair_pre,
+                                              sp_params->pair_fdi_omega, fdi_z);
+        }
+        else
+        {
+            my_grey_opacity_params->kernel_pars.pair_kernel_params.omega_prime =
+                nu_bar;
+            my_grey_opacity_params->kernel_pars.pair_kernel_params.cos_theta =
+                one;
+            my_grey_opacity_params->kernel_pars.pair_kernel_params.filter =
+                zero;
+            my_grey_opacity_params->kernel_pars.pair_kernel_params.lmax = zero;
+            my_grey_opacity_params->kernel_pars.pair_kernel_params.mu   = one;
+            my_grey_opacity_params->kernel_pars.pair_kernel_params.mu_prime =
+                one;
+            pair_kernels_m1 = PairKernels(
+                &my_eos_params,
+                &my_grey_opacity_params->kernel_pars.pair_kernel_params);
+        }
     }
 
     // compute the bremsstrahlung kernels
@@ -1652,16 +1689,24 @@ SpectralOpacities ComputeSpectralOpacitiesNotStimulatedAbs(
     my_grey_opacity_params->kernel_pars.brem_kernel_params.omega      = nu;
     my_grey_opacity_params->kernel_pars.inelastic_kernel_params.omega = nu;
 
-    GreyOpacityParams local_grey_params = *my_grey_opacity_params;
-    local_grey_params.opacity_flags.use_inelastic_scatt = 0;
+    // Create wrapper with precomputed data for Pair+Brem pass
+    SpectralIntegrandParams sp_pair_params;
+    sp_pair_params.grey_pars = *my_grey_opacity_params;
+    sp_pair_params.grey_pars.opacity_flags.use_inelastic_scatt = 0;
 
-    // set up 1d integration
-    MyFunctionMultiD integrand_m1_1d;
-    MyQuadratureIntegrand integrand_m1_1d_info = {.n = 8};
-    integrand_m1_1d.function                   = &SpectralIntegrand;
-    integrand_m1_1d.dim                        = 1;
-    integrand_m1_1d.params                     = &local_grey_params;
-    integrand_m1_1d.my_quadrature_integrand    = integrand_m1_1d_info;
+    // Precompute Pair FDI values for the fixed omega
+    if (my_grey_opacity_params->opacity_flags.use_pair)
+    {
+        const BS_REAL T         = my_grey_opacity_params->eos_pars.temp;
+        const BS_REAL eta       = my_grey_opacity_params->eos_pars.mu_e / T;
+        sp_pair_params.pair_pre = PrecomputePairParams(eta, T);
+        sp_pair_params.pair_fdi_omega = PrecomputePairFDIAtPoint(eta, nu / T);
+        sp_pair_params.has_pair_pre   = true;
+    }
+    else
+    {
+        sp_pair_params.has_pair_pre = false;
+    }
 
     // compute the neutrino & anti-neutrino distribution function
     BS_REAL g_nu[total_num_species];
@@ -1671,30 +1716,56 @@ SpectralOpacities ComputeSpectralOpacitiesNotStimulatedAbs(
         g_nu[idx] = TotalNuF(nu, &my_grey_opacity_params->distr_pars, idx);
     }
 
-    // const BS_REAL eta_e = my_grey_opacity_params->eos_pars.mu_e /
-    //                       my_grey_opacity_params->eos_pars.temp;
+    // Cache g_nu so SpectralIntegrand doesn't recompute for fixed omega
+    for (int idx = 0; idx < total_num_species; ++idx)
+    {
+        sp_pair_params.g_nu_fixed[idx] = g_nu[idx];
+    }
+    sp_pair_params.has_g_nu_fixed = true;
 
     constexpr BS_REAL temp_multiple = 0.5 * 4.364;
 
-    BS_REAL s_pair[8], s_neps[8];
+    const BS_REAL t_pair =
+        temp_multiple * my_grey_opacity_params->eos_pars.temp;
+    const BS_REAL t_neps = nu;
 
-    for (int i = 0; i < 8; ++i)
-    {
-        // s[i] = 1.5 * my_grey_opacity_params->eos_pars.temp;
-        s_pair[i] = temp_multiple * my_grey_opacity_params->eos_pars.temp;
-        s_neps[i] = nu;
-        // s[i] = my_grey_opacity_params->eos_pars.temp;
-        // s[i] = 2.425E-03 * my_grey_opacity_params->eos_pars.temp;
-        // s[i] =
-        // 0.5 * my_grey_opacity_params->eos_pars.temp *
-        // (FDI_p4(eta_e) / FDI_p3(eta_e) + FDI_p4(-eta_e) / FDI_p3(-eta_e));
-    }
+    // Inlined 1D Gauss-Legendre integration: call SpectralIntegrand once
+    // per quadrature point and use all 8 results (8x fewer evaluations
+    // than the generic GaussLegendreIntegrate1D which loops per component).
+    const int nx = quad_1d->nx;
+    BS_REAL var[2];
 
 #ifdef PROFILE_SUBREACTIONS
     PROFILE_TIC();
 #endif
-    MyQuadratureIntegrand integrals_pair_1d =
-        GaussLegendreIntegrate1D(quad_1d, &integrand_m1_1d, s_pair);
+    // Pair+Brem integration pass
+    MyQuadratureIntegrand integrals_pair_1d = {.n = 8};
+    {
+        BS_REAL f1[8][BS_N_MAX], f2[8][BS_N_MAX];
+
+        for (int i = 0; i < nx; ++i)
+        {
+            // Forward point: omega_prime = t * x_i
+            var[0]                   = t_pair * quad_1d->points[i];
+            MyQuadratureIntegrand fv = SpectralIntegrand(var, &sp_pair_params);
+            for (int k = 0; k < 8; ++k)
+                f1[k][i] = fv.integrand[k];
+
+            // Reciprocal point: omega_prime = t / x_i
+            var[0]               = t_pair / quad_1d->points[i];
+            fv                   = SpectralIntegrand(var, &sp_pair_params);
+            const BS_REAL x_i_sq = quad_1d->points[i] * quad_1d->points[i];
+            for (int k = 0; k < 8; ++k)
+                f2[k][i] = fv.integrand[k] / x_i_sq;
+        }
+
+        for (int k = 0; k < 8; ++k)
+        {
+            integrals_pair_1d.integrand[k] =
+                t_pair * (DoIntegration(nx, quad_1d->w, f1[k]) +
+                          DoIntegration(nx, quad_1d->w, f2[k]));
+        }
+    }
 #ifdef PROFILE_SUBREACTIONS
     PROFILE_TOC(time_sp_pair_brem_us);
 #endif
@@ -1705,11 +1776,43 @@ SpectralOpacities ComputeSpectralOpacitiesNotStimulatedAbs(
 #ifdef PROFILE_SUBREACTIONS
         PROFILE_TIC();
 #endif
-        local_grey_params.opacity_flags                     = {0};
-        local_grey_params.opacity_flags.use_inelastic_scatt = 1;
-        integrand_m1_1d.params = &local_grey_params;
-        integrals_neps_1d =
-            GaussLegendreIntegrate1D(quad_1d, &integrand_m1_1d, s_neps);
+        // Create wrapper for NEPS pass
+        SpectralIntegrandParams sp_neps_params;
+        sp_neps_params.grey_pars               = *my_grey_opacity_params;
+        sp_neps_params.grey_pars.opacity_flags = {0};
+        sp_neps_params.grey_pars.opacity_flags.use_inelastic_scatt = 1;
+        sp_neps_params.has_pair_pre                                = false;
+        // Cache g_nu so SpectralIntegrand doesn't recompute
+        for (int idx = 0; idx < total_num_species; ++idx)
+        {
+            sp_neps_params.g_nu_fixed[idx] = g_nu[idx];
+        }
+        sp_neps_params.has_g_nu_fixed = true;
+
+        // NEPS integration pass (same inlined approach)
+        integrals_neps_1d.n = 8;
+        BS_REAL f1[8][BS_N_MAX], f2[8][BS_N_MAX];
+
+        for (int i = 0; i < nx; ++i)
+        {
+            var[0]                   = t_neps * quad_1d->points[i];
+            MyQuadratureIntegrand fv = SpectralIntegrand(var, &sp_neps_params);
+            for (int k = 0; k < 8; ++k)
+                f1[k][i] = fv.integrand[k];
+
+            var[0]               = t_neps / quad_1d->points[i];
+            fv                   = SpectralIntegrand(var, &sp_neps_params);
+            const BS_REAL x_i_sq = quad_1d->points[i] * quad_1d->points[i];
+            for (int k = 0; k < 8; ++k)
+                f2[k][i] = fv.integrand[k] / x_i_sq;
+        }
+
+        for (int k = 0; k < 8; ++k)
+        {
+            integrals_neps_1d.integrand[k] =
+                t_neps * (DoIntegration(nx, quad_1d->w, f1[k]) +
+                          DoIntegration(nx, quad_1d->w, f2[k]));
+        }
 #ifdef PROFILE_SUBREACTIONS
         PROFILE_TOC(time_sp_neps_us);
 #endif
