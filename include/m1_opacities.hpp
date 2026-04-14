@@ -994,15 +994,8 @@ M1MatrixKokkos2D ComputeNEPSIntegrand(const MyQuadrature* quad, BS_REAL t,
 
     M1MatrixKokkos2D out = {0};
 
-    // for (int i = 0; i < n; ++i)
-    // {
-    //     x = quad->points[i];
-
-    //     nu_array_1[i]     = t * x;
-    //     nu_array_1[n + i] = t / x;
-
-    //     nu_array_2[i] = x / (1. - x) - (1. - x) / x;
-    // }
+    // Precompute NEPS FDI(eta) values once for this thermodynamic state
+    NEPSPrecomputed neps_pre = PrecomputeNEPSParams(&grey_pars->eos_pars);
 
     for (int i = 0; i < n; ++i)
     {
@@ -1039,20 +1032,8 @@ M1MatrixKokkos2D ComputeNEPSIntegrand(const MyQuadrature* quad, BS_REAL t,
                 }
             }
 
-            // compute the pair kernels
-            grey_pars->kernel_pars.inelastic_kernel_params.omega       = nu;
-            grey_pars->kernel_pars.inelastic_kernel_params.omega_prime = nu_bar;
-
-            inel_1 = InelasticScattKernels(
-                &grey_pars->kernel_pars.inelastic_kernel_params,
-                &grey_pars->eos_pars);
-
-            grey_pars->kernel_pars.inelastic_kernel_params.omega       = nu_bar;
-            grey_pars->kernel_pars.inelastic_kernel_params.omega_prime = nu;
-
-            inel_2 = InelasticScattKernels(
-                &grey_pars->kernel_pars.inelastic_kernel_params,
-                &grey_pars->eos_pars);
+            inel_1 = InelasticScattKernelsFast(nu, nu_bar, &neps_pre);
+            inel_2 = InelasticScattKernelsFast(nu_bar, nu, &neps_pre);
 
             for (int idx = 0; idx < total_num_species; ++idx)
             {
@@ -1111,20 +1092,8 @@ M1MatrixKokkos2D ComputeNEPSIntegrand(const MyQuadrature* quad, BS_REAL t,
                 }
             }
 
-            // compute the pair kernels
-            grey_pars->kernel_pars.inelastic_kernel_params.omega       = nu;
-            grey_pars->kernel_pars.inelastic_kernel_params.omega_prime = nu_bar;
-
-            inel_1 = InelasticScattKernels(
-                &grey_pars->kernel_pars.inelastic_kernel_params,
-                &grey_pars->eos_pars);
-
-            grey_pars->kernel_pars.inelastic_kernel_params.omega       = nu_bar;
-            grey_pars->kernel_pars.inelastic_kernel_params.omega_prime = nu;
-
-            inel_2 = InelasticScattKernels(
-                &grey_pars->kernel_pars.inelastic_kernel_params,
-                &grey_pars->eos_pars);
+            inel_1 = InelasticScattKernelsFast(nu, nu_bar, &neps_pre);
+            inel_2 = InelasticScattKernelsFast(nu_bar, nu, &neps_pre);
 
             for (int idx = 0; idx < total_num_species; ++idx)
             {
@@ -1454,9 +1423,11 @@ struct SpectralIntegrandParams
 {
     GreyOpacityParams grey_pars;
     PairPrecomputed pair_pre;
-    PairFDIAtPoint pair_fdi_omega;         // precomputed FDI at eta+-(omega/T)
+    PairFDIAtPoint pair_fdi_omega; // precomputed FDI at eta+-(omega/T)
+    NEPSPrecomputed neps_pre;
     BS_REAL g_nu_fixed[total_num_species]; // precomputed g_nu at fixed omega
     bool has_pair_pre;
+    bool has_neps_pre;
     bool has_g_nu_fixed;
 };
 
@@ -1563,11 +1534,21 @@ MyQuadratureIntegrand SpectralIntegrand(BS_REAL* var, void* p)
     MyKernelOutput inelastic_kernels_m1 = {0};
     if (opacity_flags.use_inelastic_scatt)
     {
-        my_grey_opacity_params->kernel_pars.inelastic_kernel_params
-            .omega_prime     = nu_bar;
-        inelastic_kernels_m1 = InelasticScattKernels(
-            &my_grey_opacity_params->kernel_pars.inelastic_kernel_params,
-            &my_grey_opacity_params->eos_pars);
+        if (sp_params->has_neps_pre)
+        {
+            BS_REAL omega = my_grey_opacity_params->kernel_pars
+                                .inelastic_kernel_params.omega;
+            inelastic_kernels_m1 =
+                InelasticScattKernelsFast(omega, nu_bar, &sp_params->neps_pre);
+        }
+        else
+        {
+            my_grey_opacity_params->kernel_pars.inelastic_kernel_params
+                .omega_prime     = nu_bar;
+            inelastic_kernels_m1 = InelasticScattKernels(
+                &my_grey_opacity_params->kernel_pars.inelastic_kernel_params,
+                &my_grey_opacity_params->eos_pars);
+        }
     }
 
     BS_REAL pro_term[total_num_species] = {0};
@@ -1684,6 +1665,7 @@ SpectralOpacities ComputeSpectralOpacitiesNotStimulatedAbs(
     SpectralIntegrandParams sp_pair_params;
     sp_pair_params.grey_pars = *my_grey_opacity_params;
     sp_pair_params.grey_pars.opacity_flags.use_inelastic_scatt = 0;
+    sp_pair_params.has_neps_pre                                = false;
 
     // Precompute Pair FDI values for the fixed omega
     if (my_grey_opacity_params->opacity_flags.use_pair)
@@ -1767,12 +1749,15 @@ SpectralOpacities ComputeSpectralOpacitiesNotStimulatedAbs(
 #ifdef PROFILE_SUBREACTIONS
         PROFILE_TIC();
 #endif
-        // Create wrapper for NEPS pass
+        // Create wrapper for NEPS pass with precomputed NEPS constants
         SpectralIntegrandParams sp_neps_params;
         sp_neps_params.grey_pars               = *my_grey_opacity_params;
         sp_neps_params.grey_pars.opacity_flags = {0};
         sp_neps_params.grey_pars.opacity_flags.use_inelastic_scatt = 1;
         sp_neps_params.has_pair_pre                                = false;
+        sp_neps_params.neps_pre =
+            PrecomputeNEPSParams(&my_grey_opacity_params->eos_pars);
+        sp_neps_params.has_neps_pre = true;
         // Cache g_nu so SpectralIntegrand doesn't recompute
         for (int idx = 0; idx < total_num_species; ++idx)
         {

@@ -396,4 +396,206 @@ void InelasticKernelsTable(const int n, BS_REAL* nu_array,
     return;
 }
 
+// ============================================================================
+// Precomputed NEPS constants for FDI reuse across kernel evaluations
+// ============================================================================
+
+// Precomputed FDI values at a single eta, constant across all (w, wp) pairs
+struct NEPSPrecomputedEta
+{
+    BS_REAL eta;             // The eta value itself (eta_e or eta_p)
+    BS_REAL fdi_p3_eta;      // FDI_p3(eta)
+    BS_REAL fdi_p4_eta;      // FDI_p4(eta)
+    BS_REAL fdi_p5_eta;      // FDI_p5(eta)
+    BS_REAL fdi_p2_eta;      // FDI_p2(eta)
+    BS_REAL fdi_p1_eta;      // FDI_p1(eta)
+    BS_REAL fdi_0_eta;       // FDI_0(eta)
+    BS_REAL fermi_distr_eta; // FermiDistr(0, 1, eta)
+};
+
+struct NEPSPrecomputed
+{
+    NEPSPrecomputedEta nes; // For NES: eta = eta_e = mu_e / T
+    NEPSPrecomputedEta nps; // For NPS: eta = eta_p = -mu_e / T
+    BS_REAL T;              // temperature (NOT T_inv, to preserve omega/T)
+};
+
+KOKKOS_INLINE_FUNCTION
+NEPSPrecomputedEta PrecomputeNEPSEta(BS_REAL eta)
+{
+    constexpr BS_REAL zero = 0;
+    constexpr BS_REAL one  = 1;
+
+    NEPSPrecomputedEta pre;
+    pre.eta             = eta;
+    pre.fdi_p3_eta      = FDI_p3(eta);
+    pre.fdi_p4_eta      = FDI_p4(eta);
+    pre.fdi_p5_eta      = FDI_p5(eta);
+    pre.fdi_p2_eta      = FDI_p2(eta);
+    pre.fdi_p1_eta      = FDI_p1(eta);
+    pre.fdi_0_eta       = FDI_0(eta);
+    pre.fermi_distr_eta = FermiDistr(zero, one, eta);
+    return pre;
+}
+
+KOKKOS_INLINE_FUNCTION
+NEPSPrecomputed PrecomputeNEPSParams(MyEOSParams* eos_params)
+{
+    NEPSPrecomputed pre;
+    pre.T = eos_params->temp;
+
+    const BS_REAL eta_e = eos_params->mu_e / pre.T;
+    const BS_REAL eta_p = -eta_e;
+
+    pre.nes = PrecomputeNEPSEta(eta_e);
+    pre.nps = PrecomputeNEPSEta(eta_p);
+
+    return pre;
+}
+
+// Version of ComputeFDIForInelastic that reuses precomputed FDI(eta) values
+// and uses combined FDI evaluation to share exp() across orders.
+// Expression trees for the differences are identical to the original.
+KOKKOS_INLINE_FUNCTION
+void ComputeFDIForInelasticFast(BS_REAL w, BS_REAL wp, BS_REAL eta,
+                                const NEPSPrecomputedEta* pre,
+                                BS_REAL* fdi_diff_w, BS_REAL* fdi_diff_abs)
+{
+    BS_REAL abs_val = fabs(w - wp);
+
+    // Evaluate FDI orders 1-5 at (eta-w) and (eta-wp) with shared exp()
+    BS_REAL p1_w, p2_w, p3_w, p4_w, p5_w;
+    BS_REAL p1_wp, p2_wp, p3_wp, p4_wp, p5_wp;
+    FDI_p12345(eta - w, &p1_w, &p2_w, &p3_w, &p4_w, &p5_w);
+    FDI_p12345(eta - wp, &p1_wp, &p2_wp, &p3_wp, &p4_wp, &p5_wp);
+
+    fdi_diff_w[0] = p1_wp - p1_w;
+    fdi_diff_w[1] = p2_wp - p2_w;
+    fdi_diff_w[2] = p3_wp - p3_w;
+    fdi_diff_w[3] = p4_wp - p4_w;
+    fdi_diff_w[4] = p5_wp - p5_w;
+
+    // Evaluate FDI orders 3-5 at (eta-|w-wp|) with shared exp()
+    BS_REAL p3_abs, p4_abs, p5_abs;
+    FDI_p345(eta - abs_val, &p3_abs, &p4_abs, &p5_abs);
+
+    // Reuse precomputed FDI_pN(eta) instead of recomputing
+    fdi_diff_abs[0] = pre->fdi_p3_eta - p3_abs;
+    fdi_diff_abs[1] = pre->fdi_p4_eta - p4_abs;
+    fdi_diff_abs[2] = pre->fdi_p5_eta - p5_abs;
+}
+
+// Generic fast kernel for a single scattering type (NES or NPS).
+// Uses omega/T division (not omega*T_inv) to preserve bitwise exactness.
+// b1_arr/b2_arr hold the (b1,b2) pair for each species.
+KOKKOS_INLINE_FUNCTION
+MyKernelOutput NEPSSingleTypeFast(BS_REAL omega, BS_REAL omega_prime,
+                                  const NEPSPrecomputedEta* pre, BS_REAL T,
+                                  const BS_REAL* b1_arr, const BS_REAL* b2_arr)
+{
+    const BS_REAL w                    = omega / T;
+    const BS_REAL wp                   = omega_prime / T;
+    const BS_REAL x                    = fmax(w, wp);
+    const BS_REAL y                    = fmin(w, wp);
+    const BS_REAL eta                  = pre->eta;
+    const BS_REAL exp_factor           = NEPSExpFunc(wp - w);
+    const BS_REAL exp_factor_exchanged = NEPSExpFunc(w - wp);
+
+    MyKernelOutput output;
+
+    constexpr BS_REAL zero = 0;
+    constexpr BS_REAL one  = 1;
+    constexpr BS_REAL six  = 6;
+
+    if (y > eta * kTaylorSeriesEpsilon)
+    {
+        BS_REAL fdi_diff_abs[3], fdi_diff_w[5];
+
+        const int sign = 2 * signbit(wp - w) - 1;
+
+        ComputeFDIForInelasticFast(w, wp, eta, pre, fdi_diff_w, fdi_diff_abs);
+
+        for (int idx = 0; idx < total_num_species; ++idx)
+        {
+            output.abs[idx] =
+                kBS_NEPS_Const * POW2(T) *
+                MezzacappaIntOut(w, wp, x, y, sign, b1_arr[idx], b2_arr[idx],
+                                 fdi_diff_w, fdi_diff_abs);
+        }
+    }
+    else if (x > eta * kTaylorSeriesEpsilon)
+    {
+        const int sign = 2 * signbit(wp - w) - 1;
+
+        // Reuse precomputed FDI values at eta
+        const BS_REAL fdis[5] = {
+            FDI_p2(eta - x) - pre->fdi_p2_eta, FDI_p1(eta - x), pre->fdi_p1_eta,
+            FDI_0(eta - x) + y * FermiDistr(zero, one, eta - x) / six,
+            pre->fdi_0_eta - y * pre->fermi_distr_eta / six};
+
+        for (int idx = 0; idx < total_num_species; ++idx)
+        {
+            output.abs[idx] = kBS_NEPS_Const * POW2(T) *
+                              MezzacappaIntOneEnergy(x, y, sign, b1_arr[idx],
+                                                     b2_arr[idx], fdis);
+        }
+    }
+    else
+    {
+        // Reuse precomputed FDI values at eta
+        const BS_REAL fdis[3] = {pre->fermi_distr_eta, pre->fdi_0_eta,
+                                 pre->fdi_p1_eta};
+
+        for (int idx = 0; idx < total_num_species; ++idx)
+        {
+            output.abs[idx] = kBS_NEPS_Const * POW2(T) *
+                              MezzacappaIntTwoEnergies(w, wp, x, y, b1_arr[idx],
+                                                       b2_arr[idx], fdis);
+        }
+    }
+
+    for (int idx = 0; idx < total_num_species; ++idx)
+    {
+        output.em[idx]  = output.abs[idx];
+        output.abs[idx] = output.abs[idx] * exp_factor;
+        output.em[idx]  = -output.em[idx] * exp_factor_exchanged;
+    }
+
+    return output;
+}
+
+// Fast combined NES+NPS kernel using precomputed constants
+KOKKOS_INLINE_FUNCTION
+MyKernelOutput InelasticScattKernelsFast(BS_REAL omega, BS_REAL omega_prime,
+                                         const NEPSPrecomputed* pre)
+{
+    // NES b1/b2 per species: nue=(BPlus,BZero), anue=(BZero,BPlus),
+    //                        nux=(BMinus,BZero), anux=(BZero,BMinus)
+    const BS_REAL nes_b1[total_num_species] = {kBS_NEPS_BPlus, kBS_NEPS_BZero,
+                                               kBS_NEPS_BMinus, kBS_NEPS_BZero};
+    const BS_REAL nes_b2[total_num_species] = {kBS_NEPS_BZero, kBS_NEPS_BPlus,
+                                               kBS_NEPS_BZero, kBS_NEPS_BMinus};
+
+    // NPS b1/b2 per species (swapped relative to NES)
+    const BS_REAL nps_b1[total_num_species] = {kBS_NEPS_BZero, kBS_NEPS_BPlus,
+                                               kBS_NEPS_BZero, kBS_NEPS_BMinus};
+    const BS_REAL nps_b2[total_num_species] = {kBS_NEPS_BPlus, kBS_NEPS_BZero,
+                                               kBS_NEPS_BMinus, kBS_NEPS_BZero};
+
+    MyKernelOutput nes_kernel = NEPSSingleTypeFast(
+        omega, omega_prime, &pre->nes, pre->T, nes_b1, nes_b2);
+    MyKernelOutput nps_kernel = NEPSSingleTypeFast(
+        omega, omega_prime, &pre->nps, pre->T, nps_b1, nps_b2);
+
+    MyKernelOutput tot_kernel = {0};
+
+    for (int idx = 0; idx < total_num_species; ++idx)
+    {
+        tot_kernel.em[idx]  = nes_kernel.em[idx] + nps_kernel.em[idx];
+        tot_kernel.abs[idx] = nes_kernel.abs[idx] + nps_kernel.abs[idx];
+    }
+
+    return tot_kernel;
+}
+
 #endif // BNS_NURATES_INCLUDE_KERNEL_NEPS_HPP_
