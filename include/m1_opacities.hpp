@@ -1425,9 +1425,11 @@ struct SpectralIntegrandParams
     PairPrecomputed pair_pre;
     PairFDIAtPoint pair_fdi_omega; // precomputed FDI at eta+-(omega/T)
     NEPSPrecomputed neps_pre;
+    BremPrecomputed brem_pre;
     BS_REAL g_nu_fixed[total_num_species]; // precomputed g_nu at fixed omega
     bool has_pair_pre;
     bool has_neps_pre;
+    bool has_brem_pre;
     bool has_g_nu_fixed;
 };
 
@@ -1510,16 +1512,25 @@ MyQuadratureIntegrand SpectralIntegrand(BS_REAL* var, void* p)
     MyKernelOutput brem_kernels_m1 = {0};
     if (opacity_flags.use_brem)
     {
-        my_grey_opacity_params->kernel_pars.brem_kernel_params.omega_prime =
-            nu_bar;
-        if (opacity_pars.use_BRT_brem == true)
+        if (sp_params->has_brem_pre)
         {
+            BS_REAL omega =
+                my_grey_opacity_params->kernel_pars.brem_kernel_params.omega;
+            brem_kernels_m1 =
+                BremKernelsLegCoeffFast(omega, nu_bar, sp_params->brem_pre);
+        }
+        else if (opacity_pars.use_BRT_brem == true)
+        {
+            my_grey_opacity_params->kernel_pars.brem_kernel_params.omega_prime =
+                nu_bar;
             brem_kernels_m1 = BremKernelsBRT06(
                 &my_grey_opacity_params->kernel_pars.brem_kernel_params,
                 &my_eos_params);
         }
         else
         {
+            my_grey_opacity_params->kernel_pars.brem_kernel_params.omega_prime =
+                nu_bar;
             my_grey_opacity_params->kernel_pars.brem_kernel_params.l = 0;
             my_grey_opacity_params->kernel_pars.brem_kernel_params
                 .use_NN_medium_corr =
@@ -1679,6 +1690,20 @@ SpectralOpacities ComputeSpectralOpacitiesNotStimulatedAbs(
     else
     {
         sp_pair_params.has_pair_pre = false;
+    }
+
+    // Precompute Brem constants if HR98 brem is used
+    if (my_grey_opacity_params->opacity_flags.use_brem &&
+        ! my_grey_opacity_params->opacity_pars.use_BRT_brem)
+    {
+        sp_pair_params.brem_pre = PrecomputeBremParams(
+            &my_grey_opacity_params->eos_pars,
+            my_grey_opacity_params->opacity_pars.use_NN_medium_corr);
+        sp_pair_params.has_brem_pre = true;
+    }
+    else
+    {
+        sp_pair_params.has_brem_pre = false;
     }
 
     // compute the neutrino & anti-neutrino distribution function
