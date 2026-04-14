@@ -251,24 +251,18 @@ struct PairPrecomputed
     BS_REAL FDI_p4_eta; // FDI_p4(eta)
 };
 
-// Compute FDI values at eta+-x for a single dimensionless energy x
-// Uses standalone FDI calls to preserve bitwise exactness
+// Compute FDI values at eta+-x for a single dimensionless energy x.
+// Uses combined FDI_p12345 to share exp() across all 5 orders.
 KOKKOS_INLINE_FUNCTION
 PairFDIAtPoint PrecomputePairFDIAtPoint(const BS_REAL eta, const BS_REAL x)
 {
     PairFDIAtPoint pt;
     const BS_REAL em = eta - x;
     const BS_REAL ep = eta + x;
-    pt.fdi_p1_minus  = FDI_p1(em);
-    pt.fdi_p2_minus  = FDI_p2(em);
-    pt.fdi_p3_minus  = FDI_p3(em);
-    pt.fdi_p4_minus  = FDI_p4(em);
-    pt.fdi_p5_minus  = FDI_p5(em);
-    pt.fdi_p1_plus   = FDI_p1(ep);
-    pt.fdi_p2_plus   = FDI_p2(ep);
-    pt.fdi_p3_plus   = FDI_p3(ep);
-    pt.fdi_p4_plus   = FDI_p4(ep);
-    pt.fdi_p5_plus   = FDI_p5(ep);
+    FDI_p12345(em, &pt.fdi_p1_minus, &pt.fdi_p2_minus, &pt.fdi_p3_minus,
+               &pt.fdi_p4_minus, &pt.fdi_p5_minus);
+    FDI_p12345(ep, &pt.fdi_p1_plus, &pt.fdi_p2_plus, &pt.fdi_p3_plus,
+               &pt.fdi_p4_plus, &pt.fdi_p5_plus);
     return pt;
 }
 
@@ -335,14 +329,12 @@ void PairPsiFast(const BS_REAL y, const BS_REAL z, const PairPrecomputed& pre,
         const BS_REAL FDI_p3_e = pre.FDI_p3_eta;
         const BS_REAL FDI_p4_e = pre.FDI_p4_eta;
 
-        // Only these 6 FDI calls remain per (y,z) pair
-        const BS_REAL yz_sum      = y + z;
-        const BS_REAL FDI_p3_emyz = FDI_p3(pre.eta - yz_sum);
-        const BS_REAL FDI_p4_emyz = FDI_p4(pre.eta - yz_sum);
-        const BS_REAL FDI_p5_emyz = FDI_p5(pre.eta - yz_sum);
-        const BS_REAL FDI_p3_epyz = FDI_p3(pre.eta + yz_sum);
-        const BS_REAL FDI_p4_epyz = FDI_p4(pre.eta + yz_sum);
-        const BS_REAL FDI_p5_epyz = FDI_p5(pre.eta + yz_sum);
+        // Only 2 combined FDI calls remain per (y,z) pair
+        const BS_REAL yz_sum = y + z;
+        BS_REAL FDI_p3_emyz, FDI_p4_emyz, FDI_p5_emyz;
+        BS_REAL FDI_p3_epyz, FDI_p4_epyz, FDI_p5_epyz;
+        FDI_p345(pre.eta - yz_sum, &FDI_p3_emyz, &FDI_p4_emyz, &FDI_p5_emyz);
+        FDI_p345(pre.eta + yz_sum, &FDI_p3_epyz, &FDI_p4_epyz, &FDI_p5_epyz);
 
         // Exact same arithmetic as original PairPsi
         const BS_REAL x0 = twenty * FDI_p4_emy;
