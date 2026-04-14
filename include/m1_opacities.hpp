@@ -338,39 +338,44 @@ void AddPairKernelsToIntegrand(int n, BS_REAL* nu_array,
                                GreyOpacityParams* grey_pars,
                                M1MatrixKokkos2D* out)
 {
-    constexpr BS_REAL zero = 0;
-    constexpr BS_REAL one  = 1;
+    const BS_REAL T   = grey_pars->eos_pars.temp;
+    const BS_REAL eta = grey_pars->eos_pars.mu_e / T;
+
+    // Precompute eta-only FDI values (2 calls, done once)
+    PairPrecomputed pre = PrecomputePairParams(eta, T);
+
+    const int nn = 2 * n;
+
+    // Precompute FDI values at eta+-(nu_array[k]/T) for all energy points
+    // (10 FDI calls per point, done once per point instead of per pair)
+    PairFDIAtPoint fdi_pts[2 * BS_N_MAX];
+    for (int k = 0; k < nn; ++k)
+    {
+        fdi_pts[k] = PrecomputePairFDIAtPoint(eta, nu_array[k] / T);
+    }
 
     MyKernelOutput pair_1, pair_2;
 
-    grey_pars->kernel_pars.pair_kernel_params.cos_theta = one;
-    grey_pars->kernel_pars.pair_kernel_params.filter    = zero;
-    grey_pars->kernel_pars.pair_kernel_params.lmax      = zero;
-    grey_pars->kernel_pars.pair_kernel_params.mu        = one;
-    grey_pars->kernel_pars.pair_kernel_params.mu_prime  = one;
-
-    for (int i = 0; i < 2 * n; ++i)
+    // Diagonal: omega = omega_prime = nu_array[i]
+    for (int i = 0; i < nn; ++i)
     {
-        grey_pars->kernel_pars.pair_kernel_params.omega       = nu_array[i];
-        grey_pars->kernel_pars.pair_kernel_params.omega_prime = nu_array[i];
-
-        PairKernels(&grey_pars->eos_pars,
-                    &grey_pars->kernel_pars.pair_kernel_params, &pair_1,
-                    &pair_2);
+        PairKernelsFast(nu_array[i], nu_array[i], pre, fdi_pts[i], fdi_pts[i],
+                        &pair_1, &pair_2);
 
         for (int idx = 0; idx < total_num_species; ++idx)
         {
             out->m1_mat_em[idx][i][i] += pair_1.em[idx];
             out->m1_mat_ab[idx][i][i] += pair_1.abs[idx];
         }
+    }
 
-        for (int j = i + 1; j < 2 * n; ++j)
+    // Upper triangle: omega = nu_array[i], omega_prime = nu_array[j]
+    for (int i = 0; i < nn; ++i)
+    {
+        for (int j = i + 1; j < nn; ++j)
         {
-            grey_pars->kernel_pars.pair_kernel_params.omega_prime = nu_array[j];
-
-            PairKernels(&grey_pars->eos_pars,
-                        &grey_pars->kernel_pars.pair_kernel_params, &pair_1,
-                        &pair_2);
+            PairKernelsFast(nu_array[i], nu_array[j], pre, fdi_pts[i],
+                            fdi_pts[j], &pair_1, &pair_2);
 
             for (int idx = 0; idx < total_num_species; ++idx)
             {
