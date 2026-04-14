@@ -1033,7 +1033,17 @@ M1MatrixKokkos2D ComputeNEPSIntegrand(const MyQuadrature* quad, BS_REAL t,
             }
 
             inel_1 = InelasticScattKernelsFast(nu, nu_bar, &neps_pre);
+#ifdef USE_NON_BITWISE_EXACT
+            // Exploit w<->wp symmetry: swapping omega and omega_prime
+            // negates the kernel, so after exp factors: abs<->em swap
+            for (int idx = 0; idx < total_num_species; ++idx)
+            {
+                inel_2.abs[idx] = inel_1.em[idx];
+                inel_2.em[idx]  = inel_1.abs[idx];
+            }
+#else
             inel_2 = InelasticScattKernelsFast(nu_bar, nu, &neps_pre);
+#endif
 
             for (int idx = 0; idx < total_num_species; ++idx)
             {
@@ -1093,7 +1103,15 @@ M1MatrixKokkos2D ComputeNEPSIntegrand(const MyQuadrature* quad, BS_REAL t,
             }
 
             inel_1 = InelasticScattKernelsFast(nu, nu_bar, &neps_pre);
+#ifdef USE_NON_BITWISE_EXACT
+            for (int idx = 0; idx < total_num_species; ++idx)
+            {
+                inel_2.abs[idx] = inel_1.em[idx];
+                inel_2.em[idx]  = inel_1.abs[idx];
+            }
+#else
             inel_2 = InelasticScattKernelsFast(nu_bar, nu, &neps_pre);
+#endif
 
             for (int idx = 0; idx < total_num_species; ++idx)
             {

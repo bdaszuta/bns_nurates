@@ -14,6 +14,11 @@
 #define PROFILE_SUBREACTIONS
 #endif
 
+// Allow for some additional optimizations that are not bitwise-exact.
+#ifndef USE_NON_BITWISE_EXACT
+#define USE_NON_BITWISE_EXACT
+#endif
+
 #include "bns_nurates.hpp"
 #include "m1_opacities.hpp"
 #include "integration.hpp"
