@@ -90,6 +90,10 @@ MWE
 mwe.cpp)
 
 ADD_BNSNURATES_EXECUTABLE(
+MWE_profile
+mwe_profile.cpp)
+
+ADD_BNSNURATES_EXECUTABLE(
 point_out
 utils/point_out.cpp)
 
