@@ -765,6 +765,160 @@ void AddCommonWeightsToIntegrand(int n, BS_REAL* nu_array,
     return;
 }
 
+// Precomputed TotalNuF values for all energy points and species.
+// Eliminates redundant recomputation in WeightNuNuBarReactionsWithDistr
+// and AddCommonWeightsToIntegrand (which otherwise evaluate TotalNuF
+// hundreds of times for only 2n*4 unique values).
+struct NuFCache
+{
+    BS_REAL g[total_num_species][2 * BS_N_MAX];
+    BS_REAL block_factor[total_num_species][2 * BS_N_MAX];
+};
+
+KOKKOS_INLINE_FUNCTION
+NuFCache PrecomputeNuFCache(int n, const BS_REAL* nu_array,
+                            GreyOpacityParams* grey_pars)
+{
+    constexpr BS_REAL one = 1;
+    NuFCache cache;
+    const int nn = 2 * n;
+    const bool use_blocking =
+        (grey_pars->opacity_pars.neglect_blocking == false);
+
+    for (int i = 0; i < nn; ++i)
+    {
+        for (int idx = 0; idx < total_num_species; ++idx)
+        {
+            cache.g[idx][i] =
+                TotalNuF(nu_array[i], &grey_pars->distr_pars, idx);
+            cache.block_factor[idx][i] =
+                use_blocking ? (one - cache.g[idx][i]) : one;
+        }
+    }
+    return cache;
+}
+
+KOKKOS_INLINE_FUNCTION
+void WeightNuNuBarReactionsWithDistrFast(int n, const NuFCache* cache,
+                                         M1MatrixKokkos2D* out)
+{
+    for (int i = 0; i < 2 * n; ++i)
+    {
+        out->m1_mat_em[id_nue][i][i] *= cache->block_factor[id_anue][i];
+        out->m1_mat_em[id_anue][i][i] *= cache->block_factor[id_nue][i];
+        out->m1_mat_em[id_nux][i][i] *= cache->block_factor[id_anux][i];
+        out->m1_mat_em[id_anux][i][i] *= cache->block_factor[id_nux][i];
+
+        out->m1_mat_ab[id_nue][i][i] *= cache->g[id_anue][i];
+        out->m1_mat_ab[id_anue][i][i] *= cache->g[id_nue][i];
+        out->m1_mat_ab[id_nux][i][i] *= cache->g[id_anux][i];
+        out->m1_mat_ab[id_anux][i][i] *= cache->g[id_nux][i];
+
+        for (int j = i + 1; j < 2 * n; ++j)
+        {
+            out->m1_mat_em[id_nue][i][j] *= cache->block_factor[id_anue][j];
+            out->m1_mat_em[id_anue][i][j] *= cache->block_factor[id_nue][j];
+            out->m1_mat_em[id_nux][i][j] *= cache->block_factor[id_anux][j];
+            out->m1_mat_em[id_anux][i][j] *= cache->block_factor[id_nux][j];
+
+            out->m1_mat_em[id_nue][j][i] *= cache->block_factor[id_anue][i];
+            out->m1_mat_em[id_anue][j][i] *= cache->block_factor[id_nue][i];
+            out->m1_mat_em[id_nux][j][i] *= cache->block_factor[id_anux][i];
+            out->m1_mat_em[id_anux][j][i] *= cache->block_factor[id_nux][i];
+
+            out->m1_mat_ab[id_nue][i][j] *= cache->g[id_anue][j];
+            out->m1_mat_ab[id_anue][i][j] *= cache->g[id_nue][j];
+            out->m1_mat_ab[id_nux][i][j] *= cache->g[id_anux][j];
+            out->m1_mat_ab[id_anux][i][j] *= cache->g[id_nux][j];
+
+            out->m1_mat_ab[id_nue][j][i] *= cache->g[id_anue][i];
+            out->m1_mat_ab[id_anue][j][i] *= cache->g[id_nue][i];
+            out->m1_mat_ab[id_nux][j][i] *= cache->g[id_anux][i];
+            out->m1_mat_ab[id_anux][j][i] *= cache->g[id_nux][i];
+        }
+    }
+    return;
+}
+
+KOKKOS_INLINE_FUNCTION
+void AddCommonWeightsToIntegrandFast(int n, const BS_REAL* nu_array,
+                                     const NuFCache* cache,
+                                     M1MatrixKokkos2D* out, int stim_abs)
+{
+    constexpr BS_REAL one = 1;
+
+    BS_REAL nu_squared, nu_fourth;
+
+    BS_ASSERT((stim_abs == 0) || (stim_abs == 1));
+
+    if (stim_abs == 1)
+    {
+        for (int i = 0; i < 2 * n; ++i)
+        {
+            nu_squared = POW2(nu_array[i]);
+            nu_fourth  = POW2(nu_squared);
+
+            for (int idx = 0; idx < total_num_species; ++idx)
+            {
+                out->m1_mat_ab[idx][i][i] =
+                    nu_fourth * cache->g[idx][i] *
+                    (out->m1_mat_em[idx][i][i] + out->m1_mat_ab[idx][i][i]);
+                out->m1_mat_em[idx][i][i] *= nu_fourth;
+            }
+
+            for (int j = i + 1; j < 2 * n; ++j)
+            {
+                nu_fourth = nu_squared * POW2(nu_array[j]);
+
+                for (int idx = 0; idx < total_num_species; ++idx)
+                {
+                    out->m1_mat_ab[idx][i][j] =
+                        nu_fourth * cache->g[idx][i] *
+                        (out->m1_mat_em[idx][i][j] + out->m1_mat_ab[idx][i][j]);
+                    out->m1_mat_ab[idx][j][i] =
+                        nu_fourth * cache->g[idx][j] *
+                        (out->m1_mat_em[idx][j][i] + out->m1_mat_ab[idx][j][i]);
+
+                    out->m1_mat_em[idx][i][j] *= nu_fourth;
+                    out->m1_mat_em[idx][j][i] *= nu_fourth;
+                }
+            }
+        }
+    }
+    else
+    {
+        for (int i = 0; i < 2 * n; ++i)
+        {
+            nu_squared = POW2(nu_array[i]);
+            nu_fourth  = POW2(nu_squared);
+
+            for (int idx = 0; idx < total_num_species; ++idx)
+            {
+                out->m1_mat_ab[idx][i][i] *= nu_fourth * cache->g[idx][i];
+                out->m1_mat_em[idx][i][i] *=
+                    nu_fourth * (one - cache->g[idx][i]);
+            }
+
+            for (int j = i + 1; j < 2 * n; ++j)
+            {
+                nu_fourth = nu_squared * POW2(nu_array[j]);
+
+                for (int idx = 0; idx < total_num_species; ++idx)
+                {
+                    out->m1_mat_ab[idx][i][j] *= nu_fourth * cache->g[idx][i];
+                    out->m1_mat_ab[idx][j][i] *= nu_fourth * cache->g[idx][j];
+
+                    out->m1_mat_em[idx][i][j] *=
+                        nu_fourth * (one - cache->g[idx][i]);
+                    out->m1_mat_em[idx][j][i] *=
+                        nu_fourth * (one - cache->g[idx][j]);
+                }
+            }
+        }
+    }
+    return;
+}
+
 /* Compute the 2d integrands for all reactions from Leonardo's notes [Eqns. (51)
  * & (52)] There are a total of two expressions for 'e' and 'x' neutrinos, so 4
  * integrands in total
@@ -808,63 +962,17 @@ M1MatrixKokkos2D ComputeDoubleIntegrand(const MyQuadrature* quad, BS_REAL t,
     if ((grey_pars->opacity_flags.use_pair == 1) ||
         (grey_pars->opacity_flags.use_brem == 1))
     {
-        WeightNuNuBarReactionsWithDistr(n, nu_array, grey_pars, &out);
+        // Precompute TotalNuF for all 2n energy points once
+        // instead of redundant evaluation in both weighting functions
+        NuFCache nuf_cache = PrecomputeNuFCache(n, nu_array, grey_pars);
+        WeightNuNuBarReactionsWithDistrFast(n, &nuf_cache, &out);
+        AddCommonWeightsToIntegrandFast(n, nu_array, &nuf_cache, &out,
+                                        stim_abs);
     }
-
-    // if (grey_pars->opacity_flags.use_inelastic_scatt == 1)
-    // {
-    //     AddInelKernelsToIntegrand(n, nu_array, grey_pars, &out);
-    // }
-
-    // /*
-    // if (grey_pars->opacity_flags.use_abs_em == 1)
-    // {
-    //   AddBetaReactionToIntegrand(n, nu_array, grey_pars, &out, stim_abs);
-    // }
-    // */
-
-    // /*
-    // //////////////////////////////////////////////
-    // ////// ONLY FOR COMPARISON WITH NULIB ////////
-    // //////////////////////////////////////////////
-    // compute the neutrino & anti-neutrino distribution function
-    // BS_REAL g_nu[total_num_species], g_nu_bar[total_num_species];
-    // BS_REAL block_factor_nu[total_num_species],
-    //    block_factor_nu_bar[total_num_species];
-    //
-    // if (kirchoff_flag)
-    // {
-    //     ann_term_ij[id_nue] +=
-    //         (pair.m1_mat_em[id_nue][i][j] + brem.m1_mat_em[0][i][j]) *
-    //         g_nu_bar[id_anue] / g_nu[id_nue];
-    //     ann_term_ij[id_anue] +=
-    //         (pair.m1_mat_em[id_anue][i][j] + brem.m1_mat_em[0][i][j]) *
-    //         g_nu_bar[id_nue] / g_nu[id_anue];
-    //     ann_term_ij[id_nux] +=
-    //         (pair.m1_mat_em[id_nux][i][j] + brem.m1_mat_em[0][i][j]) *
-    //         g_nu_bar[id_anux] / g_nu[id_nux];
-    //     ann_term_ij[id_anux] +=
-    //         (pair.m1_mat_em[id_anux][i][j] + brem.m1_mat_em[0][i][j]) *
-    //         g_nu_bar[id_nux] / g_nu[id_anux];
-
-    //     ann_term_ji[id_nue] +=
-    //         (pair.m1_mat_em[id_nue][j][i] + brem.m1_mat_em[0][j][i]) *
-    //         g_nu[id_anue] / g_nu_bar[id_nue];
-    //     ann_term_ji[id_anue] +=
-    //         (pair.m1_mat_em[id_anue][j][i] + brem.m1_mat_em[0][j][i]) *
-    //         g_nu[id_nue] / g_nu_bar[id_anue];
-    //     ann_term_ji[id_nux] +=
-    //         (pair.m1_mat_em[id_nux][j][i] + brem.m1_mat_em[0][j][i]) *
-    //         g_nu[id_anux] / g_nu_bar[id_nux];
-    //     ann_term_ji[id_anux] +=
-    //         (pair.m1_mat_em[id_anux][j][i] + brem.m1_mat_em[0][j][i]) *
-    //         g_nu[id_nux] / g_nu_bar[id_anux];
-    // }
-    // */
-
-    // //////////////////////////////////////////////
-
-    AddCommonWeightsToIntegrand(n, nu_array, grey_pars, &out, stim_abs);
+    else
+    {
+        AddCommonWeightsToIntegrand(n, nu_array, grey_pars, &out, stim_abs);
+    }
 
     return out;
 }
