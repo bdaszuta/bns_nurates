@@ -132,8 +132,8 @@ BS_REAL EtaPN(const BS_REAL nn, const BS_REAL np, const BS_REAL mu_hat,
  * Inputs:
  *    omega [MeV], mLep [MeV], muLep [MeV]
  * Outputs: j_x and 1/lambda_x for neutrino and antineutrino
- *    out[0]: c/lambda_nu [s^-1], out[1]: j_nu [s^-1], out[2]: c/lambda_anu [s^-1],
- * out[3]: j_anu [s^-1]
+ *    out[0]: c/lambda_nu [s^-1], out[1]: j_nu [s^-1], out[2]: c/lambda_anu
+ * [s^-1], out[3]: j_anu [s^-1]
  */
 KOKKOS_INLINE_FUNCTION
 void AbsOpacitySingleLep(const BS_REAL omega, OpacityParams* opacity_pars,
@@ -332,6 +332,204 @@ MyOpacity StimAbsOpacity(const BS_REAL omega, OpacityParams* opacity_pars,
                          MyEOSParams* eos_pars)
 {
     MyOpacity abs_opacity = AbsOpacity(omega, opacity_pars, eos_pars);
+
+    abs_opacity.abs[id_nue] = abs_opacity.abs[id_nue] + abs_opacity.em[id_nue];
+    abs_opacity.abs[id_anue] =
+        abs_opacity.abs[id_anue] + abs_opacity.em[id_anue];
+
+    return abs_opacity;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Precomputed beta process constants: quantities independent of neutrino energy
+////////////////////////////////////////////////////////////////////////////////
+
+struct BetaPrecomputed
+{
+    BS_REAL Qprime;         // dQ + dU [MeV]
+    BS_REAL etanp;          // EtaNP(nn, np, mu_np, T)
+    BS_REAL etapn;          // EtaPN(nn, np, mu_np, T)
+    BS_REAL T;              // temperature [MeV]
+    BS_REAL mass_lepton;    // lepton mass [MeV]
+    BS_REAL mu_lepton;      // lepton chemical potential [MeV]
+    BS_REAL mass_lepton_sq; // mass_lepton^2
+    BS_REAL mu_p;           // proton chemical potential [MeV]
+    BS_REAL mu_n;           // neutron chemical potential [MeV]
+    // Detailed balance constant offsets (to preserve exact FP arithmetic)
+    BS_REAL db_const_nue;  // -(mu_p + mu_lepton - mu_n), so arg = (omega +
+                           // db_const_nue) / T
+    BS_REAL db_const_anue; // -(mu_n - mu_p - mu_lepton), so arg = (omega +
+                           // db_const_anue) / T
+    bool use_WM_ab;        // weak magnetism flag
+    bool use_decay;        // positron decay flag
+};
+
+// Precompute all omega-independent beta process quantities
+KOKKOS_INLINE_FUNCTION
+BetaPrecomputed PrecomputeBetaParams(OpacityParams* opacity_pars,
+                                     MyEOSParams* eos_pars,
+                                     const BS_REAL mass_lepton,
+                                     const BS_REAL mu_lepton)
+{
+    BetaPrecomputed bp;
+
+    const BS_REAL nb   = eos_pars->nb;
+    const BS_REAL T    = eos_pars->temp;
+    const BS_REAL yp   = eos_pars->yp;
+    const BS_REAL yn   = eos_pars->yn;
+    const BS_REAL mu_p = eos_pars->mu_p;
+    const BS_REAL mu_n = eos_pars->mu_n;
+
+    const BS_REAL nn = nb * yn;
+    const BS_REAL np = nb * yp;
+
+    BS_REAL dU = 0., dQ = kBS_Q;
+    if (opacity_pars->use_dU)
+        dU = eos_pars->dU;
+    if (opacity_pars->use_dm_eff)
+        dQ = eos_pars->dm_eff;
+
+    const BS_REAL mu_hat = mu_n - mu_p - dQ;
+    const BS_REAL mu_np  = mu_hat - dU;
+
+    bp.Qprime         = dQ + dU;
+    bp.etanp          = EtaNP(nn, np, mu_np, T);
+    bp.etapn          = EtaPN(nn, np, mu_np, T);
+    bp.T              = T;
+    bp.mass_lepton    = mass_lepton;
+    bp.mu_lepton      = mu_lepton;
+    bp.mass_lepton_sq = POW2(mass_lepton);
+    bp.mu_p           = mu_p;
+    bp.mu_n           = mu_n;
+    // Store constant offsets to preserve exact FP arithmetic in detailed
+    // balance: original: SafeExp((omega - (mu_p + mu_lepton - mu_n)) / T)
+    //         = SafeExp((omega + db_const_nue) / T)
+    bp.db_const_nue  = -(mu_p + mu_lepton - mu_n);
+    bp.db_const_anue = -(mu_n - mu_p - mu_lepton);
+    bp.use_WM_ab     = opacity_pars->use_WM_ab;
+    bp.use_decay     = opacity_pars->use_decay;
+
+    return bp;
+}
+
+// Fast version of AbsOpacitySingleLep using precomputed constants.
+// Identical arithmetic to AbsOpacitySingleLep but avoids recomputing
+// dU, dQ, mu_hat, Qprime, mu_np, etanp, etapn on every call.
+KOKKOS_INLINE_FUNCTION
+void AbsOpacitySingleLepFast(const BS_REAL omega, const BetaPrecomputed& bp,
+                             BS_REAL* out)
+{
+    constexpr BS_REAL zero = 0;
+    constexpr BS_REAL one  = 1;
+
+    BS_REAL E_e, E_p;
+    BS_REAL E_e_squared, E_p_squared;
+    BS_REAL cap_term = 0., dec_term = 0.;
+    BS_REAL fd_e, fd_p;
+    BS_REAL R = 1., Rbar = 1.;
+
+    // Phase space, recoil and weak magnetism correction
+    if (bp.use_WM_ab)
+        WMAbsEm(omega, &R, &Rbar);
+
+    // Electron/muon-type neutrino
+    E_e = omega + bp.Qprime;
+    E_p = -E_e;
+
+    E_e_squared = E_e * E_e;
+    E_p_squared = E_p * E_p;
+
+    fd_e = FermiDistr(E_e, bp.T, +bp.mu_lepton);
+    fd_p = FermiDistr(E_p, bp.T, -bp.mu_lepton);
+
+    if (E_e - bp.mass_lepton >= zero)
+    {
+        cap_term =
+            E_e_squared * sqrt(one - bp.mass_lepton_sq / E_e_squared) * R;
+    }
+
+    if (bp.use_decay)
+    {
+        if (E_p - bp.mass_lepton >= zero)
+        {
+            dec_term =
+                E_p_squared * sqrt(one - bp.mass_lepton_sq / E_p_squared);
+        }
+    }
+
+    // Neutrino emissivity [s^-1]
+    out[1] =
+        kBS_Beta_Const * bp.etapn * (cap_term * fd_e + dec_term * (one - fd_p));
+    // Neutrino absorptivity [s^-1] via detailed balance
+    // Preserves exact FP arithmetic: (omega - (mu_p + mu_lepton - mu_n)) / T
+    out[0] = out[1] * SafeExp((omega + bp.db_const_nue) / bp.T);
+
+    cap_term = zero;
+    dec_term = zero;
+
+    E_p = omega - bp.Qprime;
+    E_e = -E_p;
+
+    E_e_squared = E_e * E_e;
+    E_p_squared = E_p * E_p;
+
+    fd_e = FermiDistr(E_e, bp.T, +bp.mu_lepton);
+    fd_p = FermiDistr(E_p, bp.T, -bp.mu_lepton);
+
+    if (E_p - bp.mass_lepton >= zero)
+    {
+        cap_term =
+            E_p_squared * sqrt(one - bp.mass_lepton_sq / E_p_squared) * Rbar;
+    }
+
+    if (bp.use_decay)
+    {
+        if (E_e - bp.mass_lepton >= zero)
+        {
+            dec_term =
+                E_e_squared * sqrt(one - bp.mass_lepton_sq / E_e_squared);
+        }
+    }
+
+    // Antineutrino emissivity [s^-1]
+    out[3] =
+        kBS_Beta_Const * bp.etanp * (cap_term * fd_p + dec_term * (one - fd_e));
+    // Antineutrino absorptivity [s^-1] via detailed balance
+    // Preserves exact FP arithmetic: (omega - (mu_n - mu_p - mu_lepton)) / T
+    out[2] = out[3] * SafeExp((omega + bp.db_const_anue) / bp.T);
+
+    BS_ASSERT(isfinite(out[1]) && out[1] >= zero,
+              "Invalid beta-process nue emissivity.");
+    BS_ASSERT(isfinite(out[3]) && out[3] >= zero,
+              "Invalid beta-process anue emissivity.");
+    BS_ASSERT(isfinite(out[0]) && out[0] >= zero,
+              "Invalid beta-process nue absorptivity.");
+    BS_ASSERT(isfinite(out[2]) && out[2] >= zero,
+              "Invalid beta-process anue absorptivity.");
+}
+
+// Fast AbsOpacity using precomputed constants
+KOKKOS_INLINE_FUNCTION
+MyOpacity AbsOpacityFast(const BS_REAL omega, const BetaPrecomputed& bp)
+{
+    MyOpacity MyOut = {0};
+
+    BS_REAL el_out[4] = {0.0};
+    AbsOpacitySingleLepFast(omega, bp, el_out);
+
+    MyOut.abs[id_nue]  = el_out[0];
+    MyOut.em[id_nue]   = el_out[1];
+    MyOut.abs[id_anue] = el_out[2];
+    MyOut.em[id_anue]  = el_out[3];
+
+    return MyOut;
+}
+
+// Fast StimAbsOpacity using precomputed constants
+KOKKOS_INLINE_FUNCTION
+MyOpacity StimAbsOpacityFast(const BS_REAL omega, const BetaPrecomputed& bp)
+{
+    MyOpacity abs_opacity = AbsOpacityFast(omega, bp);
 
     abs_opacity.abs[id_nue] = abs_opacity.abs[id_nue] + abs_opacity.em[id_nue];
     abs_opacity.abs[id_anue] =

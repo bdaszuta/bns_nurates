@@ -142,6 +142,11 @@ void Beta1DIntegrand(const MyQuadrature* quad, GreyOpacityParams* grey_pars,
     BS_REAL nu, nu_sqr, g_nu;
     MyOpacity abs_em_beta;
 
+    // Precompute omega-independent beta process quantities once
+    BetaPrecomputed beta_pre =
+        PrecomputeBetaParams(&grey_pars->opacity_pars, &grey_pars->eos_pars,
+                             kBS_Me, grey_pars->eos_pars.mu_e);
+
     if (stim_abs == 1)
     {
         for (int i = 0; i < n; ++i)
@@ -155,8 +160,7 @@ void Beta1DIntegrand(const MyQuadrature* quad, GreyOpacityParams* grey_pars,
 
             g_nu = TotalNuF(nu, &grey_pars->distr_pars, id_nue);
 
-            abs_em_beta = StimAbsOpacity(nu, &grey_pars->opacity_pars,
-                                         &grey_pars->eos_pars); // [s^-1]
+            abs_em_beta = StimAbsOpacityFast(nu, beta_pre); // [s^-1]
 
 
             out_em[id_nue][i] = nu_sqr * abs_em_beta.em[id_nue];
@@ -172,8 +176,7 @@ void Beta1DIntegrand(const MyQuadrature* quad, GreyOpacityParams* grey_pars,
             nu_sqr = POW2(nu);
             g_nu   = TotalNuF(nu, &grey_pars->distr_pars, id_anue);
 
-            abs_em_beta = StimAbsOpacity(nu, &grey_pars->opacity_pars,
-                                         &grey_pars->eos_pars); // [s^-1]
+            abs_em_beta = StimAbsOpacityFast(nu, beta_pre); // [s^-1]
 
             out_em[id_anue][i] = nu_sqr * abs_em_beta.em[id_anue];
 
@@ -188,8 +191,7 @@ void Beta1DIntegrand(const MyQuadrature* quad, GreyOpacityParams* grey_pars,
             nu_sqr = POW2(nu);
             g_nu   = TotalNuF(nu, &grey_pars->distr_pars, id_nue);
 
-            abs_em_beta = StimAbsOpacity(nu, &grey_pars->opacity_pars,
-                                         &grey_pars->eos_pars); // [s^-1]
+            abs_em_beta = StimAbsOpacityFast(nu, beta_pre); // [s^-1]
 
             out_em[id_nue][n + i] = nu_sqr * abs_em_beta.em[id_nue];
 
@@ -204,8 +206,7 @@ void Beta1DIntegrand(const MyQuadrature* quad, GreyOpacityParams* grey_pars,
             nu_sqr = POW2(nu);
             g_nu   = TotalNuF(nu, &grey_pars->distr_pars, id_anue);
 
-            abs_em_beta = StimAbsOpacity(nu, &grey_pars->opacity_pars,
-                                         &grey_pars->eos_pars); // [s^-1]
+            abs_em_beta = StimAbsOpacityFast(nu, beta_pre); // [s^-1]
 
             out_em[id_anue][n + i] = nu_sqr * abs_em_beta.em[id_anue];
 
@@ -225,8 +226,7 @@ void Beta1DIntegrand(const MyQuadrature* quad, GreyOpacityParams* grey_pars,
             nu_sqr = POW2(nu);
             g_nu   = TotalNuF(nu, &grey_pars->distr_pars, id_nue);
 
-            abs_em_beta = AbsOpacity(nu, &grey_pars->opacity_pars,
-                                     &grey_pars->eos_pars); // [s^-1]
+            abs_em_beta = AbsOpacityFast(nu, beta_pre); // [s^-1]
 
 
             out_em[id_nue][i] = nu_sqr * abs_em_beta.em[id_nue];
@@ -240,8 +240,7 @@ void Beta1DIntegrand(const MyQuadrature* quad, GreyOpacityParams* grey_pars,
             nu_sqr = POW2(nu);
             g_nu   = TotalNuF(nu, &grey_pars->distr_pars, id_anue);
 
-            abs_em_beta = AbsOpacity(nu, &grey_pars->opacity_pars,
-                                     &grey_pars->eos_pars); // [s^-1]
+            abs_em_beta = AbsOpacityFast(nu, beta_pre); // [s^-1]
 
             out_em[id_anue][i] = nu_sqr * abs_em_beta.em[id_anue];
             out_ab[id_anue][i] = nu_sqr * g_nu * abs_em_beta.abs[id_anue];
@@ -254,8 +253,7 @@ void Beta1DIntegrand(const MyQuadrature* quad, GreyOpacityParams* grey_pars,
             nu_sqr = POW2(nu);
             g_nu   = TotalNuF(nu, &grey_pars->distr_pars, id_nue);
 
-            abs_em_beta = AbsOpacity(nu, &grey_pars->opacity_pars,
-                                     &grey_pars->eos_pars); // [s^-1]
+            abs_em_beta = AbsOpacityFast(nu, beta_pre); // [s^-1]
 
             out_em[id_nue][n + i] = nu_sqr * abs_em_beta.em[id_nue];
             out_ab[id_nue][n + i] = nu_sqr * g_nu * abs_em_beta.abs[id_nue];
@@ -268,8 +266,7 @@ void Beta1DIntegrand(const MyQuadrature* quad, GreyOpacityParams* grey_pars,
             nu_sqr = POW2(nu);
             g_nu   = TotalNuF(nu, &grey_pars->distr_pars, id_anue);
 
-            abs_em_beta = AbsOpacity(nu, &grey_pars->opacity_pars,
-                                     &grey_pars->eos_pars); // [s^-1]
+            abs_em_beta = AbsOpacityFast(nu, beta_pre); // [s^-1]
 
             out_em[id_anue][n + i] = nu_sqr * abs_em_beta.em[id_anue];
             out_ab[id_anue][n + i] = nu_sqr * g_nu * abs_em_beta.abs[id_anue];

@@ -103,34 +103,34 @@ Gray scattering opacity 'scat1' :          cm^-1
 =============================================================================
 Function                                     Total (ms)     Avg (us)  % total
 -----------------------------------------------------------------------------
-GaussLegendre                                     0.288        2.882    0.13%
-NuEquilibriumParams                               0.155        1.548    0.07%
-ComputeM1DensitiesEq                              0.172        1.717    0.08%
-ComputeSpectralOpacities [eq]                    53.368      533.676   24.46%
-    Pair+Brem integration                         0.000        0.000    0.00%
-    NEPS integration                              0.000        0.000    0.00%
-    Beta processes                                0.000        0.000    0.00%
-    Iso scattering                                0.000        0.000    0.00%
-ComputeM1Opacities [eq]                          55.125      551.248   25.26%
-    Iso scattering (1D)                           0.000        0.000    0.00%
-    Beta processes (1D)                           0.000        0.000    0.00%
-    Pair+Brem (2D)                                0.000        0.000    0.00%
-    NEPS / Inelastic scatt (2D)                   0.000        0.000    0.00%
-    Assembly                                      0.000        0.000    0.00%
-CalculateDistrParamsFromM1                        0.240        2.402    0.11%
-ComputeSpectralOpacities [m1]                    53.876      538.759   24.69%
-    Pair+Brem integration                         0.000        0.000    0.00%
-    NEPS integration                              0.000        0.000    0.00%
-    Beta processes                                0.000        0.000    0.00%
-    Iso scattering                                0.000        0.000    0.00%
-ComputeM1Opacities [m1]                          54.981      549.814   25.20%
-    Iso scattering (1D)                           0.000        0.000    0.00%
-    Beta processes (1D)                           0.000        0.000    0.00%
-    Pair+Brem (2D)                                0.000        0.000    0.00%
-    NEPS / Inelastic scatt (2D)                   0.000        0.000    0.00%
-    Assembly                                      0.000        0.000    0.00%
+GaussLegendre                                     0.275        2.752    0.12%
+NuEquilibriumParams                               0.153        1.530    0.06%
+ComputeM1DensitiesEq                              0.172        1.717    0.07%
+ComputeSpectralOpacities [eq]                    57.969      579.688   24.47%
+    Pair+Brem integration                        37.575      375.751   15.86%
+    NEPS integration                             19.181      191.814    8.10%
+    Beta processes                                0.194        1.938    0.08%
+    Iso scattering                                0.179        1.785    0.08%
+ComputeM1Opacities [eq]                          59.561      595.607   25.14%
+    Iso scattering (1D)                           2.197       21.973    0.93%
+    Beta processes (1D)                           1.260       12.595    0.53%
+    Pair+Brem (2D)                               31.996      319.962   13.51%
+    NEPS / Inelastic scatt (2D)                  22.988      229.880    9.70%
+    Assembly                                      0.159        1.588    0.07%
+CalculateDistrParamsFromM1                        0.227        2.267    0.10%
+ComputeSpectralOpacities [m1]                    58.536      585.364   24.71%
+    Pair+Brem integration                        37.904      379.039   16.00%
+    NEPS integration                             19.404      194.039    8.19%
+    Beta processes                                0.192        1.916    0.08%
+    Iso scattering                                0.183        1.827    0.08%
+ComputeM1Opacities [m1]                          59.977      599.773   25.32%
+    Iso scattering (1D)                           2.226       22.257    0.94%
+    Beta processes (1D)                           1.277       12.774    0.54%
+    Pair+Brem (2D)                               32.125      321.248   13.56%
+    NEPS / Inelastic scatt (2D)                  23.234      232.338    9.81%
+    Assembly                                      0.164        1.638    0.07%
 -----------------------------------------------------------------------------
-TOTAL                                           218.205     2182.045  100.00%
+TOTAL                                           236.870     2368.698  100.00%
 =============================================================================
 ```
 
